@@ -339,33 +339,24 @@ fn handle_xeo(script: String, reverse: bool) {
     println!("{}", "handling xeo script...");
     let pwd = PathBuf::from(get_current_path());
     let mut dir = home::home_dir().unwrap().join(" ");
-    
-    //lexer(&script, &reverse);
-}
 
-fn main() {
-    // let cli = Cli::parse();
-    // if cli.reverse {
-    //     println!("{} {}", "[xeo] reversing file operations on".green(), cli.path);
-    //     println!("in construction!");
-    // } else {
-    //     println!("{} {}", "[xeo] handling file".green(), cli.path);
-    //     // Add your normal file operation logic here
-    // }
-    // if cli.version {
-    //     println!("{}", ABOUT);
-    //     println!("{}", VERSION);
-    // }
-    let script = r#"
-        print "Hello world!"
-        repeat 3 as $n
-            print "This is iteration number $n"
-        end
-    "#;
-
-    let tokenized = lex_lines(script);
-
+    let tokenized = lex_lines(&script);
     let ast = parse_tokens(tokenized);
     let mut ctx = Context::new();
     execute_ast(&ast, &mut ctx);
+}
+
+fn main() {
+    let cli = Cli::parse();
+    if cli.reverse {
+         println!("{} {}", "[xeo] reversing file operations on".green(), cli.path);
+         println!("in construction!");
+    } else {
+         println!("{} {}", "[xeo] handling file".green(), cli.path);
+         read_xeo(&cli.path, cli.reverse);
+     }
+     if cli.version {
+         println!("{}", ABOUT);
+         println!("{}", VERSION);
+    }
 }

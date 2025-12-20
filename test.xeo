@@ -1,0 +1,4 @@
+print "hello broskis in the world 3 spades"
+repeat 33 as $n
+  print "world $n spades when"
+end
