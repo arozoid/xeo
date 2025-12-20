@@ -11,6 +11,20 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[derive(Parser, Debug)]
+#[command(name = "xeo", about = ABOUT, version = VERSION, disable_version_flag = true)]
+struct Cli {
+  /// reverses .xeo operations
+  #[arg(short, long)]
+  reverse: bool,
+  
+  /// prints current .xeo version
+  #[arg(short, long)]
+  version: bool,
+  
+  path: String,
+}
+
 static VERSION: &str = env!("CARGO_PKG_VERSION");
 static ABOUT: &str = "\u{1b}[0;32mthe .xeo scripting lang\u{1b}[0m";
 
@@ -353,7 +367,7 @@ fn main() {
          println!("in construction!");
     } else {
          println!("{} {}", "[xeo] handling file".green(), cli.path);
-         read_xeo(&cli.path, cli.reverse);
+         read_xeo(&PathBuf::from(cli.path), cli.reverse);
      }
      if cli.version {
          println!("{}", ABOUT);
