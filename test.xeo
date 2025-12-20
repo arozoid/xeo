@@ -1,5 +1,0 @@
-print "hello broskis in the world 3 spades"
-repeat 33 as $n
-  string "$n" + "$n" as $e
-  print "$e"
-end

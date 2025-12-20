@@ -1,0 +1,30 @@
+# xeo script example
+print "--- starting xeon engine ---"
+
+# 1. basic variables and math
+calc 10 + 5 as $base_val
+calc $base_val * 2 as $total
+print "the calculated total is: " $total
+
+# 2. string manipulation
+string "hello" + "_" + "world" as $greeting
+print "message: " $greeting
+
+# 3. user interaction
+ask $user_name "what is your name? "
+print "welcome to the engine, " $user_name
+
+# 4. the reversible undo engine
+print "creating files (this is logged in .revlog)..."
+make "session_log.txt"
+make "user_data.tmp"
+
+# 5. modularity (running a sub-script)
+# this will use the same context and shared revlog
+use "lib/tools.xeo"
+
+# 6. extension system
+# running the 'xeo' binary itself from ~/.xeon/bin
+ext xeo "subtask.xeo"
+
+print "--- script finished successfully ---"

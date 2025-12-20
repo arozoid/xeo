@@ -1,9 +1,11 @@
 [package]
 name = "xeo"
-version = "0.1.0"
+version = "2.2.2"
 edition = "2024"
 
 [dependencies]
 clap = { version = ">=4.0", features = ["derive"] }
 colored = ">=2.1"
 home = ">=0.5"
+evalexpr = ">=8.1"
+reqwest = { version = ">=0.12", features = ["blocking"] }

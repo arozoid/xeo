@@ -4,12 +4,20 @@ use std::path::PathBuf;
 use std::fs;
 use std::io::Write;
 use std::io;
-use std::process::Command;
-use std::process;
 use std::env;
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
+fn get_xeon_dir() -> PathBuf {
+    #[cfg(windows)]
+    let mut path = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    
+    #[cfg(unix)]
+    let mut path = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+
+    path.push(".xeon");
+    path
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "xeo", about = ABOUT, version = VERSION, disable_version_flag = true)]
@@ -19,8 +27,11 @@ struct Cli {
   reverse: bool,
   
   /// prints current .xeo version
-  #[arg(short, long)]
+  #[arg(long)]
   version: bool,
+    /// enable verbose debug output
+    #[arg(short, long)]
+    verbose: bool,
   
   path: String,
 }
@@ -122,7 +133,7 @@ fn lex_lines(lines: &str) -> Vec<Vec<Token>> {
 }
 
 // parser functions
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ASTNodeKind {
     Command { name: String, args: Vec<String> },
     Repeat { times: String, var: Option<String>, body: Vec<ASTNode> },
@@ -130,7 +141,7 @@ enum ASTNodeKind {
     If { condition: String, body: Vec<ASTNode>, else_body: Vec<ASTNode> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ASTNode {
     kind: ASTNodeKind,
     line_number: usize,
@@ -188,6 +199,110 @@ fn parse_block(lines: &[(usize, Vec<Token>)], start_idx: usize, end_idx: usize) 
                 i = consumed;
                 continue;
             }
+            Some(Token::Command(cmd)) if cmd == "if" => {
+                // extract full condition expression (all tokens after `if`)
+                let cond_parts: Vec<String> = tokens.iter().skip(1).filter_map(|t| match t {
+                    Token::StringLiteral(s) => Some(s.clone()),
+                    Token::Variable(v) => Some(v.clone()),
+                    Token::Command(c) => Some(c.clone()),
+                }).collect();
+                let condition = cond_parts.join(" ");
+
+                // parse body until 'else' or 'end'
+                let mut body: Vec<ASTNode> = Vec::new();
+                let mut else_body: Vec<ASTNode> = Vec::new();
+                let mut j = i + 1;
+                while j < end_idx {
+                    let (ln2, toks2) = &lines[j];
+                    match toks2.first() {
+                        Some(Token::Command(c2)) if c2 == "end" => {
+                            j += 1; // consume 'end'
+                            break;
+                        }
+                        Some(Token::Command(c2)) if c2 == "else" => {
+                            // support `else if <cond>` on the same line
+                            if toks2.len() >= 2 {
+                                if let Token::Command(next) = &toks2[1] {
+                                    if next == "if" {
+                                        // build condition from remaining tokens on this line
+                                        let cond_parts: Vec<String> = toks2.iter().skip(2).filter_map(|t| match t {
+                                            Token::StringLiteral(s) => Some(s.clone()),
+                                            Token::Variable(v) => Some(v.clone()),
+                                            Token::Command(c) => Some(c.clone()),
+                                        }).collect();
+                                        let cond2 = cond_parts.join(" ");
+
+                                        // parse body for this else-if until next `else` or `end` at same level
+                                        let mut nested_body: Vec<ASTNode> = Vec::new();
+                                        let mut k = j + 1;
+                                        while k < end_idx {
+                                            let (ln3, toks3) = &lines[k];
+                                            match toks3.first() {
+                                                Some(Token::Command(x)) if x == "end" || x == "else" => break,
+                                                Some(Token::Command(x)) if x == "repeat" || x == "func" || x == "if" => {
+                                                    let (nested, consumed) = parse_block(lines, k, end_idx);
+                                                    nested_body.extend(nested);
+                                                    k = consumed;
+                                                    continue;
+                                                }
+                                                Some(Token::Command(_)) => {
+                                                    nested_body.push(ASTNode {
+                                                        kind: ASTNodeKind::Command { name: tokens_to_args(&toks3)[0].clone(), args: tokens_to_args(&toks3)[1..].to_vec() },
+                                                        line_number: *ln3,
+                                                    });
+                                                }
+                                                Some(&Token::StringLiteral(_)) | Some(&Token::Variable(_)) => todo!(),
+                                                None => {},
+                                            }
+                                            k += 1;
+                                        }
+
+                                        // push the else-if as an If node inside else_body
+                                        else_body.push(ASTNode {
+                                            kind: ASTNodeKind::If { condition: cond2, body: nested_body, else_body: Vec::new() },
+                                            line_number: *ln2,
+                                        });
+
+                                        // continue parsing from the sentinel (do not consume it here)
+                                        j = k;
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // normal `else` (not an `else if`) — parse until matching 'end'
+                            let (ebody, consumed) = parse_block(lines, j+1, end_idx);
+                            else_body = ebody;
+                            j = consumed;
+                            break;
+                        }
+                        Some(Token::Command(c2)) if c2 == "repeat" || c2 == "func" || c2 == "if" => {
+                            // nested block: delegate to parse_block starting at this line
+                            let (nested, consumed) = parse_block(lines, j, end_idx);
+                            body.extend(nested);
+                            j = consumed;
+                            continue;
+                        }
+                        Some(Token::Command(_)) => {
+                            // simple command line inside if body
+                            body.push(ASTNode {
+                                kind: ASTNodeKind::Command { name: tokens_to_args(&toks2)[0].clone(), args: tokens_to_args(&toks2)[1..].to_vec() },
+                                line_number: *ln2,
+                            });
+                        }
+                        Some(&Token::StringLiteral(_)) | Some(&Token::Variable(_)) => todo!(),
+                        None => {},
+                    }
+                    j += 1;
+                }
+
+                ast.push(ASTNode {
+                    kind: ASTNodeKind::If { condition, body, else_body },
+                    line_number: *line_number,
+                });
+                i = j;
+                continue;
+            }
             Some(Token::Command(cmd)) if cmd == "func" => {
                 let name = tokens.get(1).map(|t| match t {
                     Token::StringLiteral(s) => s.clone(),
@@ -228,12 +343,32 @@ fn parse_tokens(lines: Vec<Vec<Token>>) -> Vec<ASTNode> {
 struct Context {
     variables: HashMap<String, String>,
     line_map: HashMap<usize, *const ASTNode>, // line number -> AST node
+    functions: HashMap<String, Vec<ASTNode>>,
+    reverse_ops: Vec<ReverseOp>,
+    reverse_mode: bool,
+    verbose: bool,
+    script_dir: Option<PathBuf>,
 }
 
 impl Context {
     fn new() -> Self {
-        Self { variables: HashMap::new(), line_map: HashMap::new() }
+        Self { variables: HashMap::new(), line_map: HashMap::new(), functions: HashMap::new(), reverse_ops: Vec::new(), reverse_mode: false, verbose: false, script_dir: None }
     }
+}
+
+fn verbose_log(ctx: &Context, msg: &str) {
+    if ctx.verbose {
+        println!("{} {}", "[xeo] dbg:".cyan(), msg);
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ReverseOp {
+    Delete(String), // path
+    Move { src: String, dest: String },
+    Restore { backup: String, original: String },
+    Chmod { path: String, mode: u32 },
+    Chdir { from: String, to: String },
 }
 
 fn interpolate(s: &str, ctx: &Context) -> String {
@@ -266,10 +401,180 @@ fn interpolate(s: &str, ctx: &Context) -> String {
     out
 }
 
+fn report_error(msg: &str) {
+    eprintln!("{} {}", "[xeo] err:".red(), msg);
+}
+
+fn prepare_condition(cond: &str, ctx: &Context) -> String {
+    let ops = ["==","!=","<=",">=","<",">","&&","||","(",")","+","-","*","/","%"];
+    let mut out_parts: Vec<String> = Vec::new();
+    for tok in cond.split_whitespace() {
+        if tok.starts_with('$') {
+            if let Some(val) = ctx.variables.get(tok) {
+                // numeric or boolean should be unquoted
+                if val.parse::<f64>().is_ok() || val == "true" || val == "false" {
+                    out_parts.push(val.clone());
+                } else {
+                    let esc = val.replace('"', "\\\"");
+                    out_parts.push(format!("\"{}\"", esc));
+                }
+            } else {
+                // unknown variable -> treat as empty string
+                out_parts.push("\"\"".to_string());
+            }
+        } else if tok.starts_with('"') && tok.ends_with('"') {
+            out_parts.push(tok.to_string());
+        } else if ops.contains(&tok) {
+            out_parts.push(tok.to_string());
+        } else if tok.parse::<f64>().is_ok() || tok == "true" || tok == "false" {
+            out_parts.push(tok.to_string());
+        } else {
+            // treat as literal string
+            let esc = tok.replace('"', "\\\"");
+            out_parts.push(format!("\"{}\"", esc));
+        }
+    }
+    out_parts.join(" ")
+}
+
+fn ensure_recycle_dir(_ctx: &Context) -> Option<PathBuf> {
+    // place recycle directory under ~/.xeon to centralize backups
+    let mut dir = get_xeon_dir();
+    dir.push(".xeo_recycle");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        report_error(&format!("could not create recycle dir: {}", e));
+        return None;
+    }
+    Some(dir)
+}
+
+fn make_backup(ctx: &Context, orig: &str) -> Option<String> {
+    let recycle = ensure_recycle_dir(ctx)?;
+    let basename = PathBuf::from(&orig)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string()) // Convert the reference to an owned String
+        .unwrap_or_else(|| "item".to_string());
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let backup_name = format!("{}_{}", ts, basename);
+    let backup_path = recycle.join(backup_name);
+    let backup_str = backup_path.to_string_lossy().to_string();
+
+    // Try to rename (fast), fall back to copy
+    if std::fs::rename(orig, &backup_str).is_ok() {
+        if ctx.verbose {
+            verbose_log(ctx, &format!("make_backup renamed {} -> {}", orig, backup_str));
+        }
+        return Some(backup_str);
+    }
+
+    // not renamable; try copying file
+    if let Ok(meta) = std::fs::metadata(orig) {
+        if meta.is_file() {
+            if std::fs::copy(orig, &backup_str).is_ok() {
+                if ctx.verbose {
+                    verbose_log(ctx, &format!("make_backup copied {} -> {}", orig, backup_str));
+                }
+                // remove original
+                let _ = std::fs::remove_file(orig);
+                return Some(backup_str);
+            }
+        } else if meta.is_dir() {
+            // fallback: try to rename dir (already failed) -> report error
+            report_error(&format!("cannot backup directory {}", orig));
+            return None;
+        }
+    }
+    None
+}
+
+fn serialize_revlog(path: &PathBuf, ops: &[ReverseOp]) {
+    let mut s = String::new();
+    for op in ops {
+        match op {
+            ReverseOp::Delete(p) => s.push_str(&format!("DELETE\t{}\n", p)),
+            ReverseOp::Move { src, dest } => s.push_str(&format!("MOVE\t{}\t{}\n", src, dest)),
+            ReverseOp::Restore { backup, original } => s.push_str(&format!("RESTORE\t{}\t{}\n", backup, original)),
+            ReverseOp::Chmod { path, mode } => s.push_str(&format!("CHMOD\t{}\t{}\n", path, mode)),
+            ReverseOp::Chdir { from, to } => s.push_str(&format!("CHDIR\t{}\t{}\n", from, to)),
+        }
+    }
+    if let Err(e) = std::fs::write(path, s) {
+        report_error(&format!("failed to write revlog {}: {}", path.display(), e));
+    }
+}
+
+fn deserialize_revlog(path: &PathBuf) -> Vec<ReverseOp> {
+    let mut out = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            match parts.get(0).map(|s| *s) {
+                Some("DELETE") => { if let Some(p) = parts.get(1) { out.push(ReverseOp::Delete(p.to_string())); } }
+                Some("MOVE") => { if parts.len() >= 3 { out.push(ReverseOp::Move { src: parts[1].to_string(), dest: parts[2].to_string() }); } }
+                Some("RESTORE") => { if parts.len() >= 3 { out.push(ReverseOp::Restore { backup: parts[1].to_string(), original: parts[2].to_string() }); } }
+                Some("CHMOD") => { if parts.len() >= 3 { if let Ok(m) = parts[2].parse::<u32>() { out.push(ReverseOp::Chmod { path: parts[1].to_string(), mode: m }); } } }
+                Some("CHDIR") => { if parts.len() >= 3 { out.push(ReverseOp::Chdir { from: parts[1].to_string(), to: parts[2].to_string() }); } }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn execute_reverse_ops(mut ops: Vec<ReverseOp>, base_dir: Option<PathBuf>, verbose: bool) {
+    // execute in reverse order
+    ops.reverse();
+    for op in ops {
+        match op {
+            ReverseOp::Delete(p) => {
+                if verbose { println!("{} DELETE {}", "[xeo] dbg:".cyan(), p); }
+                let _ = if std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false) { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+            }
+            ReverseOp::Move { src, dest } => {
+                if verbose { println!("{} MOVE {} -> {}", "[xeo] dbg:".cyan(), src, dest); }
+                let _ = std::fs::rename(&src, &dest);
+            }
+            ReverseOp::Restore { backup, original } => {
+                // If original is relative, resolve against base_dir (script start dir) if provided
+                let orig_path = if Path::new(&original).is_absolute() {
+                    PathBuf::from(&original)
+                } else if let Some(b) = base_dir.as_ref() {
+                    b.join(&original)
+                } else {
+                    PathBuf::from(&original)
+                };
+                if verbose { println!("{} RESTORE {} -> {}", "[xeo] dbg:".cyan(), backup, orig_path.display()); }
+                let _ = std::fs::rename(&backup, &orig_path);
+            }
+            ReverseOp::Chmod { path, mode } => {
+                if verbose { println!("{} CHMOD {} -> {}", "[xeo] dbg:".cyan(), path, mode); }
+                #[cfg(unix)] {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+                }
+            }
+            ReverseOp::Chdir { from, to: _ } => {
+                if verbose { println!("{} CHDIR -> {}", "[xeo] dbg:".cyan(), from); }
+                if let Err(e) = std::env::set_current_dir(&from) {
+                    report_error(&format!("failed to chdir during reverse to {}: {}", from, e));
+                }
+            }
+        }
+    }
+}
+
 fn execute_ast(ast: &[ASTNode], ctx: &mut Context) {
     // build line map for go
     for node in ast {
         ctx.line_map.insert(node.line_number, node as *const ASTNode);
+    }
+
+    // register function definitions so `run` can find them
+    for node in ast {
+        if let ASTNodeKind::Func { name, body } = &node.kind {
+            ctx.functions.insert(name.clone(), body.clone());
+        }
     }
 
     let mut pc = 0;
@@ -305,7 +610,7 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
 
                     let (expr_parts, var_name_opt) = if let Some(i) = as_idx {
                         (args[..i].to_vec(), args.get(i+1).cloned())
-                    } else if args.len() >= 2 && args.last().unwrap().starts_with('$') {
+                    } else if args.len() >= 2 && args.last().map_or(false, |s| s.starts_with('$')) {
                         // support: string <expr...> $var
                         (args[..args.len()-1].to_vec(), args.last().cloned())
                     } else if args.len() >= 2 {
@@ -333,13 +638,43 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                     }
                 }
             }
+            "calc" => {
+                if let Some(idx) = args.iter().position(|s| s == "as") {
+                    // 1. get the math parts and interpolate ($var -> 10)
+                    let eval_parts: Vec<String> = args[..idx]
+                        .iter()
+                        .map(|p| interpolate(p, &ctx))
+                        .collect();
+                    let calc_string = eval_parts.join(" ");
+
+                    // 2. actually do the math
+                    match evalexpr::eval(&calc_string) {
+                        Ok(value) => {
+                            // 3. safely get the variable name after 'as'
+                            if let Some(var_name) = args.get(idx + 1) {
+                                ctx.variables.insert(var_name.clone(), value.to_string());
+                            }
+                        }
+                        Err(e) => report_error(&format!("calc error: {}", e)),
+                    }
+                } else {
+                    report_error("usage: calc <expression> as <variable>");
+                }
+            }
             "ask" => {
-                if let Some(var) = args.get(0) {
-                    print!("> ");
-                    io::stdout().flush().unwrap();
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input).unwrap();
-                    ctx.variables.insert(var.clone(), input.trim().to_string());
+                // Syntax: ask $var "What is your name? "
+                if let (Some(_var), Some(prompt_text)) = (args.get(0), args.get(1)) {
+                    let prompt = interpolate(prompt_text, ctx);
+                    print!("{}", prompt);
+                } else if let Some(_var) = args.get(0) {
+                    print!("> "); // Default prompt
+                }
+
+                io::stdout().flush().ok(); // Shorthand for "try to flush, ignore errors"
+                
+                let mut input = String::new();
+                if io::stdin().read_line(&mut input).is_ok() {
+                    ctx.variables.insert(args[0].clone(), input.trim().to_string());
                 }
             }
             "go" => {
@@ -347,6 +682,391 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                     if let Ok(line) = target_line.parse::<usize>() {
                         return Some(line);
                     }
+                }
+            }
+            "dir" => {
+                if let Some(p) = args.get(0) {
+                    let path = interpolate(p, ctx);
+                    // compute canonical absolute forms for prev and new paths
+                    let prev_abs = std::env::current_dir()
+                        .ok()
+                        .and_then(|p| std::fs::canonicalize(&p).ok())
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| get_current_path());
+
+                    let new_abs = {
+                        let candidate = if Path::new(&path).is_absolute() {
+                            PathBuf::from(&path)
+                        } else {
+                            std::env::current_dir().map(|cwd| cwd.join(&path)).unwrap_or_else(|_| PathBuf::from(&path))
+                        };
+                        std::fs::canonicalize(&candidate).map(|p| p.display().to_string()).unwrap_or_else(|_| candidate.display().to_string())
+                    };
+
+                    if ctx.verbose {
+                        verbose_log(ctx, &format!("chdir: {} -> {}", prev_abs, new_abs));
+                    }
+
+                    match std::env::set_current_dir(&path) {
+                        Ok(_) => {
+                            if ctx.verbose {
+                                if let Ok(cwd) = std::env::current_dir() {
+                                    verbose_log(ctx, &format!("cwd now: {}", cwd.display()));
+                                }
+                            }
+                            if !ctx.reverse_mode {
+                                // record chdir as from previous abs -> new abs
+                                ctx.reverse_ops.push(ReverseOp::Chdir { from: prev_abs.clone(), to: new_abs.clone() });
+                            }
+                        }
+                        Err(e) => report_error(&format!("dir error: {}", e)),
+                    }
+                }
+            }
+            "mkdir" => {
+                if let Some(p) = args.get(0) {
+                    let path = interpolate(p, ctx);
+                    match std::fs::create_dir_all(&path) {
+                        Ok(_) => {
+                            if ctx.verbose {
+                                verbose_log(ctx, &format!("mkdir created: {}", path));
+                            }
+                            if !ctx.reverse_mode {
+                                let abs = if Path::new(&path).is_absolute() { path.clone() } else { std::env::current_dir().map(|cwd| cwd.join(&path).display().to_string()).unwrap_or(path.clone()) };
+                                ctx.reverse_ops.push(ReverseOp::Delete(abs));
+                            }
+                        }
+                        Err(e) => report_error(&format!("mkdir error: {}", e)),
+                    }
+                }
+            }
+            "make" => {
+                if let Some(p) = args.get(0) {
+                    // 1. Get the name (Handle variables like $name)
+                    let file_name = interpolate(p, ctx);
+
+                    // 2. Create it exactly as provided
+                    // compute an absolute path for logging / reverse-op bookkeeping
+                    let abs = if Path::new(&file_name).is_absolute() {
+                        file_name.clone()
+                    } else {
+                        std::env::current_dir().map(|cwd| cwd.join(&file_name).display().to_string()).unwrap_or(file_name.clone())
+                    };
+
+                    // ensure parent directories exist (defensive)
+                    let abs_pathbuf = PathBuf::from(&abs);
+                    if let Some(parent) = abs_pathbuf.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            report_error(&format!("failed to create parent dirs {}: {}", parent.display(), e));
+                        }
+                    }
+
+                    // create the file using the absolute path and verify
+                    match std::fs::OpenOptions::new().create(true).write(true).open(&abs_pathbuf) {
+                        Ok(f) => {
+                            if let Err(e) = f.sync_all() { verbose_log(ctx, &format!("failed to sync file: {}", e)); }
+                            if ctx.verbose {
+                                verbose_log(ctx, &format!("make created: {} (abs {})", file_name, abs));
+                            }
+                            // ensure file exists
+                            if std::fs::metadata(&abs_pathbuf).is_err() {
+                                report_error(&format!("file created but metadata not found: {}", abs_pathbuf.display()));
+                            }
+                            // record reverse-op
+                            if !ctx.reverse_mode {
+                                ctx.reverse_ops.push(ReverseOp::Delete(abs));
+                            }
+                        }
+                        Err(e) => {
+                            report_error(&format!("failed to create file {}: {}", abs_pathbuf.display(), e));
+                        }
+                    }
+                }
+            }
+            "move" => {
+                if let (Some(s), Some(d)) = (args.get(0), args.get(1)) {
+                    let src = interpolate(s, ctx);
+                    let dest = interpolate(d, ctx);
+                    match std::fs::rename(&src, &dest) {
+                        Ok(_) => {
+                            if !ctx.reverse_mode {
+                                let abs_src = if Path::new(&src).is_absolute() { src.clone() } else { std::env::current_dir().map(|cwd| cwd.join(&src).display().to_string()).unwrap_or(src.clone()) };
+                                let abs_dest = if Path::new(&dest).is_absolute() { dest.clone() } else { std::env::current_dir().map(|cwd| cwd.join(&dest).display().to_string()).unwrap_or(dest.clone()) };
+                                ctx.reverse_ops.push(ReverseOp::Move { src: abs_dest.clone(), dest: abs_src.clone() });
+                            }
+                        }
+                        Err(e) => report_error(&format!("move error: {} -> {}: {}", src, dest, e)),
+                    }
+                }
+            }
+            "copy" => {
+                if let (Some(s), Some(d)) = (args.get(0), args.get(1)) {
+                    let src = interpolate(s, ctx);
+                    let dest = interpolate(d, ctx);
+                    match std::fs::copy(&src, &dest) {
+                        Ok(_) => {
+                            if !ctx.reverse_mode {
+                                let abs_dest = if Path::new(&dest).is_absolute() { dest.clone() } else { std::env::current_dir().map(|cwd| cwd.join(&dest).display().to_string()).unwrap_or(dest.clone()) };
+                                // if dest existed before, backup it; otherwise delete dest on reverse
+                                ctx.reverse_ops.push(ReverseOp::Delete(abs_dest));
+                            }
+                        }
+                        Err(e) => report_error(&format!("copy error: {} -> {}: {}", src, dest, e)),
+                    }
+                }
+            }
+            "delete" => {
+                if let Some(p) = args.get(0) {
+                    let path = interpolate(p, ctx);
+                    // check if it's a dir or file
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if meta.is_dir() {
+                            // attempt to move to recycle for restore
+                            if !ctx.reverse_mode {
+                                if let Some(backup) = make_backup(ctx, &path) {
+                                    ctx.reverse_ops.push(ReverseOp::Restore { backup, original: path.clone() });
+                                } else {
+                                    // fallback to remove
+                                    if let Err(e) = std::fs::remove_dir_all(&path) {
+                                        report_error(&format!("delete error (dir): {}: {}", path, e));
+                                    }
+                                }
+                            } else {
+                                if let Err(e) = std::fs::remove_dir_all(&path) {
+                                    report_error(&format!("delete error (dir): {}: {}", path, e));
+                                }
+                            }
+                        } else {
+                            if !ctx.reverse_mode {
+                                if let Some(backup) = make_backup(ctx, &path) {
+                                    ctx.reverse_ops.push(ReverseOp::Restore { backup, original: path.clone() });
+                                } else if let Err(e) = std::fs::remove_file(&path) {
+                                    report_error(&format!("delete error (file): {}: {}", path, e));
+                                }
+                            } else {
+                                if let Err(e) = std::fs::remove_file(&path) {
+                                    report_error(&format!("delete error (file): {}: {}", path, e));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "chmod" => {
+                if let Some(p) = args.get(0) {
+                    let path = interpolate(p, ctx);
+                    #[cfg(unix)] {
+                        use std::os::unix::fs::PermissionsExt;
+                        match std::fs::metadata(&path) {
+                            Ok(meta) => {
+                                let prev_mode = meta.permissions().mode();
+                                if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
+                                    report_error(&format!("chmod error: {}", e));
+                                } else if !ctx.reverse_mode {
+                                    ctx.reverse_ops.push(ReverseOp::Chmod { path: path.clone(), mode: prev_mode });
+                                }
+                            }
+                            Err(e) => report_error(&format!("chmod metadata error: {}", e)),
+                        }
+                    }
+                }
+            }
+            "link" => {
+                if let (Some(s), Some(d)) = (args.get(0), args.get(1)) {
+                    let src = interpolate(s, ctx);
+                    let dest = interpolate(d, ctx);
+                    #[cfg(unix)] {
+                        match std::os::unix::fs::symlink(&src, &dest) {
+                            Ok(_) => { if !ctx.reverse_mode { ctx.reverse_ops.push(ReverseOp::Delete(dest.clone())); } }
+                            Err(e) => report_error(&format!("link error: {} -> {}: {}", src, dest, e)),
+                        }
+                    }
+                    #[cfg(windows)] {
+                        use std::os::windows::fs::{symlink_file, symlink_dir};
+                        let res = if let Ok(meta) = std::fs::metadata(&src) {
+                            if meta.is_dir() {
+                                std::os::windows::fs::symlink_dir(&src, &dest)
+                            } else {
+                                std::os::windows::fs::symlink_file(&src, &dest)
+                            }
+                        } else {
+                            // If src doesn't exist yet, assume it's a file
+                            std::os::windows::fs::symlink_file(&src, &dest)
+                        };
+                        if let Err(e) = res {
+                            report_error(&format!("link error: {} -> {}: {}", src, dest, e));
+                        } else if !ctx.reverse_mode {
+                            ctx.reverse_ops.push(ReverseOp::Delete(dest.clone()));
+                        }
+                    }
+                }
+            }
+            "append" => {
+                if let (Some(f), Some(t)) = (args.get(0), args.get(1)) {
+                    let path = interpolate(f, ctx);
+                    let text = interpolate(t, ctx);
+                    use std::io::Write;
+                    // backup original before modifying
+                    if std::fs::metadata(&path).is_ok() && !ctx.reverse_mode {
+                        if let Some(backup) = make_backup(ctx, &path) {
+                            ctx.reverse_ops.push(ReverseOp::Restore { backup: backup.clone(), original: path.clone() });
+                        }
+                    }
+                    // Use create(true) so append will create the file if it doesn't exist
+                    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                        Ok(mut file) => {
+                            if let Err(e) = writeln!(file, "{}", text) {
+                                report_error(&format!("append error: {}", e));
+                            }
+                        }
+                        Err(e) => report_error(&format!("append error: {}", e)),
+                    }
+                }
+            }
+            "replace" => {
+                if let (Some(f), Some(t)) = (args.get(0), args.get(1)) {
+                    let path = interpolate(f, ctx);
+                    let text = interpolate(t, ctx);
+                    // backup original before replacing
+                    if std::fs::metadata(&path).is_ok() && !ctx.reverse_mode {
+                        if let Some(backup) = make_backup(ctx, &path) {
+                            ctx.reverse_ops.push(ReverseOp::Restore { backup: backup.clone(), original: path.clone() });
+                        }
+                    }
+                    if let Err(e) = std::fs::write(&path, text) {
+                        report_error(&format!("replace error: {}", e));
+                    }
+                }
+            }
+            "use" => {
+                if let Some(p) = args.get(0) {
+                    let path = interpolate(p, ctx);
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        // 1. Convert string to 2D tokens (Lines -> Tokens)
+                        let sub_tokens = lex_lines(&content);
+                        
+                        // 2. Convert 2D tokens to AST
+                        let sub_ast = parse_tokens(sub_tokens); 
+                        
+                        // 3. Execute using the SAME context
+                        execute_ast(&sub_ast, ctx);
+                    } else {
+                        report_error(&format!("use error: could not read file at {}", &path));
+                    }
+                }
+            }
+            "run" => {
+                if let Some(fname) = args.get(0) {
+                    // 1. Scope the borrow: get the body and CLONE it
+                    let body = ctx.functions.get(fname).cloned();
+
+                    // 2. Now the borrow of 'ctx' is over, so we can pass 'ctx' mutably
+                    if let Some(nodes) = body {
+                        execute_ast(&nodes, ctx);
+                    } else {
+                        report_error(&format!("run error: unknown function {}", fname));
+                    }
+                }
+            }
+            "wget" => {
+                if let Some(url_arg) = args.get(0) {
+                    let url = interpolate(url_arg, ctx);
+                    
+                    // Determine filename: use 2nd arg or pull from URL
+                    let filename = if let Some(f) = args.get(1) {
+                        interpolate(f, ctx)
+                    } else {
+                        url.split('/').last().unwrap_or("download.out").to_string()
+                    };
+
+                    println!("Downloading {} to {}...", url, filename);
+
+                    match reqwest::blocking::get(&url) {
+                        Ok(mut response) => {
+                            if response.status().is_success() {
+                                match std::fs::File::create(&filename) {
+                                    Ok(mut file) => {
+                                        if let Err(e) = std::io::copy(&mut response, &mut file) {
+                                            report_error(&format!("Write error: {}", e));
+                                        } else {
+                                            println!("Download complete.");
+                                        }
+                                    }
+                                    Err(e) => report_error(&format!("File error: {}", e)),
+                                }
+                            } else {
+                                report_error(&format!("Server returned error: {}", response.status()));
+                            }
+                        }
+                        Err(e) => report_error(&format!("Network error: {}", e)),
+                    }
+                }
+            }
+            "fetch" => {
+                // Syntax: fetch <url> as $var
+                if let (Some(url_arg), Some(idx)) = (args.get(0), args.iter().position(|s| s == "as")) {
+                    let url = interpolate(url_arg, ctx);
+                    let var_name = args.get(idx + 1);
+
+                    if let Ok(response) = reqwest::blocking::get(&url) {
+                        if let (Ok(text), Some(name)) = (response.text(), var_name) {
+                                ctx.variables.insert(name.clone(), text.trim().to_string());
+                            }
+                    }
+                }
+            }
+            "ext" => {
+                if let Some(plugin_name) = args.get(0) {
+                    let plugin_name = interpolate(plugin_name, ctx);
+                    
+                    // Construct path to ~/.xeon/bin
+                    let mut exe_path = home::home_dir()
+                        .map(|p| p.join(".xeon").join("bin"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    
+                    exe_path.push(&plugin_name);
+
+                    #[cfg(windows)]
+                    if exe_path.extension().is_none() {
+                        exe_path.set_extension("exe");
+                    }
+
+                    if exe_path.exists() {
+                        let plugin_args: Vec<String> = args[1..].iter()
+                            .map(|a| interpolate(a, ctx))
+                            .collect();
+
+                        if ctx.verbose {
+                            verbose_log(ctx, &format!("executing extension: {:?}", exe_path));
+                        }
+
+                        // Execute and inherit streams
+                        let mut cmd = std::process::Command::new(&exe_path);
+                        let status = cmd.args(plugin_args)
+                            .stdin(std::process::Stdio::inherit())
+                            .stdout(std::process::Stdio::inherit())
+                            .stderr(std::process::Stdio::inherit())
+                            .status();
+
+                        match status {
+                            Ok(s) => {
+                                // Force a flush of stdout so child output appears before parent continues
+                                use std::io::Write;
+                                let _ = std::io::stdout().flush();
+
+                                if !s.success() {
+                                    if ctx.verbose {
+                                        verbose_log(ctx, &format!("extension {} exited with code: {}", plugin_name, s));
+                                    }
+                                }
+                            }
+                            Err(e) => report_error(&format!("failed to start {}: {}", plugin_name, e)),
+                        }
+                    } else {
+                        report_error(&format!("binary not found: {:?}", exe_path));
+                    }
+                } else {
+                    report_error("ext requires a plugin name");
                 }
             }
             "exit" => std::process::exit(0),
@@ -383,93 +1103,123 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                 ctx.variables.remove(var_name);
             }
         }
-        ASTNodeKind::If { condition, body, else_body } => {
-            // simple string truthiness
-            let cond_val = if condition.starts_with('$') {
-                ctx.variables.get(condition).cloned().unwrap_or_default()
-            } else {
-                condition.clone()
-            };
-            if !cond_val.is_empty() {
-                execute_ast(&body, ctx);
-            } else {
-                execute_ast(&else_body, ctx);
+            ASTNodeKind::If { condition, body, else_body } => {
+            // prepare condition safely (quote strings, substitute vars)
+            let interp = prepare_condition(condition, ctx);
+            match evalexpr::eval_boolean(&interp) {
+                Ok(true) => execute_ast(&body, ctx),
+                Ok(false) => execute_ast(&else_body, ctx),
+                Err(e) => {
+                    report_error(&format!("if eval error: {} (expr='{}')", e, interp));
+                    // fallback: treat non-empty interpolated string as truthy
+                    if !interp.is_empty() {
+                        execute_ast(&body, ctx);
+                    } else {
+                        execute_ast(&else_body, ctx);
+                    }
+                }
             }
         }
-        &ASTNodeKind::Func { .. } => todo!()
+        &ASTNodeKind::Func { .. } => {
+            // function definitions are handled before execution; no-op at runtime
+        }
     }
     None
 }
 
-fn read_xeo(path: &PathBuf, reverse: bool) {
+fn read_xeo(path: &PathBuf, reverse: bool, verbose: bool) {
     match fs::read_to_string(path) {
         Ok(content) => {
-            println!("{}", "read xeo script");
-            handle_xeo(content, reverse);
+            println!("{} {}", "[xeo] read".green(), format!("{:?}", path));
+            handle_xeo(content, reverse, path, verbose);
         },
         Err(e) => {
-            eprintln!("{} {}", "failed to read xeo script:".red(), e);
+            report_error(&format!("failed to read xeo script: {}", e));
         }
     }
 }
 
-fn handle_xeo(script: String, reverse: bool) {
-    println!("{}", "handling xeo script...");
+fn handle_xeo(script: String, reverse: bool, script_path: &PathBuf, verbose: bool) {
+    println!("{} .xeo {}", "[xeo] interpreting".green(), "script...".green());
     let pwd = PathBuf::from(get_current_path());
-    let mut dir = home::home_dir().unwrap().join(" ");
+    let dir = home::home_dir()
+        .map(|p| p.join(".xeon")) // Only joins if home_dir() returned Some
+        .unwrap_or_else(|| {
+            report_error("could not determine home directory; defaulting to current dir");
+            PathBuf::from(".")
+        });
 
     let tokenized = lex_lines(&script);
     let ast = parse_tokens(tokenized);
     let mut ctx = Context::new();
+    ctx.reverse_mode = reverse;
+    ctx.verbose = verbose;
+    // resolve script path to an absolute path and record script directory for backups/revlogs
+    let script_abs = std::fs::canonicalize(script_path).unwrap_or_else(|_| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(script_path)
+    });
+    ctx.script_dir = script_abs.parent().map(|p| p.to_path_buf());
+    // revlog will live in ~/.xeon as <script-stem>.revlog
+    let revlog_path = {
+        let d = get_xeon_dir();
+        let stem = script_abs.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "script".to_string());
+        d.join(format!("{}.revlog", stem))
+    };
+    if ctx.verbose {
+        verbose_log(&ctx, &format!("script_path abs: {}", script_abs.display()));
+        verbose_log(&ctx, &format!("script_dir={}", ctx.script_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| String::from("."))));
+        verbose_log(&ctx, &format!("revlog will be: {}", revlog_path.display()));
+    }
+
+    if reverse {
+        // run reverse ops from revlog
+        if revlog_path.exists() {
+            let ops = deserialize_revlog(&revlog_path);
+            if ops.is_empty() {
+                report_error(&format!("no reverse ops found in {}", revlog_path.display()));
+            } else {
+                execute_reverse_ops(ops, ctx.script_dir.clone(), ctx.verbose);
+                println!("{} reversed operations from {}", "[xeo]".green(), revlog_path.display());
+            }
+        } else {
+            report_error(&format!("no revlog found at {}", revlog_path.display()));
+        }
+        return;
+    }
+
+    // Normal execution: run AST and persist reverse ops
     execute_ast(&ast, &mut ctx);
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lex_handles_plus_and_quotes() {
-        let tokens = lex_line(r#""a"+"b" as $n"#);
-        assert_eq!(tokens.len(), 5);
-        match &tokens[0] { Token::StringLiteral(s) => assert_eq!(s, "a"), _ => panic!("expected string") }
-        match &tokens[1] { Token::Command(c) => assert_eq!(c, "+"), _ => panic!("expected +") }
-        match &tokens[2] { Token::StringLiteral(s) => assert_eq!(s, "b"), _ => panic!("expected string") }
-        match &tokens[3] { Token::Command(c) => assert_eq!(c, "as"), _ => panic!("expected as") }
-        match &tokens[4] { Token::Variable(v) => assert_eq!(v, "$n"), _ => panic!("expected var") }
+    change_path(&dir).unwrap_or_else(|e| {
+        report_error(&format!("could not find .xeon directory: {}", e));
+        pwd.clone()
+    });
+    if !ctx.reverse_ops.is_empty() {
+        // write revlog into ~/.xeon with script-stem.revlog
+        let rev_dir = get_xeon_dir();
+        if let Err(e) = std::fs::create_dir_all(&rev_dir) {
+            report_error(&format!("could not create revlog dir {}: {}", rev_dir.display(), e));
+        } else {
+            let stem = script_abs.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "script".to_string());
+            let out_path = rev_dir.join(format!("{}.revlog", stem));
+            serialize_revlog(&out_path, &ctx.reverse_ops);
+            println!("{} wrote revlog to {}", "[xeo]".green(), out_path.display());
+        }
     }
-
-    #[test]
-    fn string_command_concatenates_and_assigns() {
-        let script = r#"string "a" + "b" as $n"#;
-        let tokenized = lex_lines(script);
-        let ast = parse_tokens(tokenized);
-        let mut ctx = Context::new();
-        execute_ast(&ast, &mut ctx);
-        assert_eq!(ctx.variables.get("$n").map(|s| s.as_str()), Some("ab"));
-    }
-
-    #[test]
-    fn string_command_interpolates_vars() {
-        let script = r#"string "$x" + "z" as $n"#;
-        let tokenized = lex_lines(script);
-        let ast = parse_tokens(tokenized);
-        let mut ctx = Context::new();
-        ctx.variables.insert("$x".into(), "y".into());
-        execute_ast(&ast, &mut ctx);
-        assert_eq!(ctx.variables.get("$n").map(|s| s.as_str()), Some("yz"));
-    }
+    change_path(&pwd).unwrap_or_else(|e| {
+        report_error(&format!("could not restore original directory: {}", e));
+        pwd.clone()
+    });
 }
 
 fn main() {
     let cli = Cli::parse();
-    if cli.reverse {
-         println!("{} {}", "[xeo] reversing file operations on".green(), cli.path);
-         println!("in construction!");
-    } else {
-         println!("{} {}", "[xeo] handling file".green(), cli.path);
-         read_xeo(&PathBuf::from(cli.path), cli.reverse);
-     }
+        if cli.reverse {
+            println!("{} {}", "[xeo] reversing file operations on".green(), cli.path);
+        } else {
+            println!("{} \"{}\"", "[xeo] handling file".green(), cli.path);
+        }
+        read_xeo(&PathBuf::from(cli.path), cli.reverse, cli.verbose);
      if cli.version {
          println!("{}", ABOUT);
          println!("{}", VERSION);
