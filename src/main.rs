@@ -52,28 +52,61 @@ fn change_path(target: &PathBuf) -> Result<PathBuf, std::io::Error> {
 // lexer functions
 fn lex_line(line: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
-    let mut iter = line.split_whitespace().peekable();
+    let mut chars = line.chars().peekable();
 
-    while let Some(word) = iter.next() {
-        if word.starts_with('"') {
-            // start of string literal
-            let mut content = word.trim_start_matches('"').to_string();
-            // if the starting word also ends with a quote, we're done
-            if !word.ends_with('"') || word.len() == 1 {
-                // keep consuming until the closing quote
-                while let Some(next) = iter.next() {
-                    content.push(' ');
-                    content.push_str(next);
-                    if next.ends_with('"') {
-                        break;
-                    }
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        if ch == '"' {
+            // string literal
+            chars.next(); // consume opening quote
+            let mut content = String::new();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    break;
+                }
+                content.push(c);
+            }
+            tokens.push(Token::StringLiteral(content));
+            continue;
+        }
+
+        if ch == '$' {
+            // variable
+            chars.next(); // consume $
+            let mut ident = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_alphanumeric() || c == '_' {
+                    ident.push(c);
+                    chars.next();
+                } else {
+                    break;
                 }
             }
-            tokens.push(Token::StringLiteral(content.trim_end_matches('"').to_string()));
-        } else if word.starts_with('$') {
-            tokens.push(Token::Variable(word.to_string()));
-        } else {
-            tokens.push(Token::Command(word.to_string()));
+            tokens.push(Token::Variable(format!("${}", ident)));
+            continue;
+        }
+
+        if ch == '+' {
+            chars.next();
+            tokens.push(Token::Command("+".to_string()));
+            continue;
+        }
+
+        // plain command/word (e.g., as, repeat, print, numbers)
+        let mut word = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() || c == '+' || c == '$' || c == '"' {
+                break;
+            }
+            word.push(c);
+            chars.next();
+        }
+        if !word.is_empty() {
+            tokens.push(Token::Command(word));
         }
     }
 
@@ -264,9 +297,40 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                 println!();
             }
             "string" => {
-                if args.len() >= 2 {
-                    let value = interpolate(&args[0], ctx);
-                    ctx.variables.insert(args[1].clone(), value);
+                if args.is_empty() {
+                    // nothing to do
+                } else {
+                    // look for `as` syntax: parts before `as` are the expression, token after `as` is the variable
+                    let as_idx = args.iter().position(|s| s == "as");
+
+                    let (expr_parts, var_name_opt) = if let Some(i) = as_idx {
+                        (args[..i].to_vec(), args.get(i+1).cloned())
+                    } else if args.len() >= 2 && args.last().unwrap().starts_with('$') {
+                        // support: string <expr...> $var
+                        (args[..args.len()-1].to_vec(), args.last().cloned())
+                    } else if args.len() >= 2 {
+                        // backward compatible: string <value> <var>
+                        (vec![args[0].clone()], args.get(1).cloned())
+                    } else {
+                        (args.clone(), None)
+                    };
+
+                    // evaluate expression parts, skipping '+' tokens and interpolating variables inside parts
+                    let mut evaluated_parts: Vec<String> = Vec::new();
+                    let mut i = 0;
+                    while i < expr_parts.len() {
+                        if expr_parts[i] == "+" {
+                            i += 1;
+                            continue;
+                        }
+                        evaluated_parts.push(interpolate(&expr_parts[i], ctx));
+                        i += 1;
+                    }
+
+                    let value = evaluated_parts.join("");
+                    if let Some(var_name) = var_name_opt {
+                        ctx.variables.insert(var_name, value);
+                    }
                 }
             }
             "ask" => {
@@ -358,6 +422,43 @@ fn handle_xeo(script: String, reverse: bool) {
     let ast = parse_tokens(tokenized);
     let mut ctx = Context::new();
     execute_ast(&ast, &mut ctx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lex_handles_plus_and_quotes() {
+        let tokens = lex_line(r#""a"+"b" as $n"#);
+        assert_eq!(tokens.len(), 5);
+        match &tokens[0] { Token::StringLiteral(s) => assert_eq!(s, "a"), _ => panic!("expected string") }
+        match &tokens[1] { Token::Command(c) => assert_eq!(c, "+"), _ => panic!("expected +") }
+        match &tokens[2] { Token::StringLiteral(s) => assert_eq!(s, "b"), _ => panic!("expected string") }
+        match &tokens[3] { Token::Command(c) => assert_eq!(c, "as"), _ => panic!("expected as") }
+        match &tokens[4] { Token::Variable(v) => assert_eq!(v, "$n"), _ => panic!("expected var") }
+    }
+
+    #[test]
+    fn string_command_concatenates_and_assigns() {
+        let script = r#"string "a" + "b" as $n"#;
+        let tokenized = lex_lines(script);
+        let ast = parse_tokens(tokenized);
+        let mut ctx = Context::new();
+        execute_ast(&ast, &mut ctx);
+        assert_eq!(ctx.variables.get("$n").map(|s| s.as_str()), Some("ab"));
+    }
+
+    #[test]
+    fn string_command_interpolates_vars() {
+        let script = r#"string "$x" + "z" as $n"#;
+        let tokenized = lex_lines(script);
+        let ast = parse_tokens(tokenized);
+        let mut ctx = Context::new();
+        ctx.variables.insert("$x".into(), "y".into());
+        execute_ast(&ast, &mut ctx);
+        assert_eq!(ctx.variables.get("$n").map(|s| s.as_str()), Some("yz"));
+    }
 }
 
 fn main() {
