@@ -5,7 +5,7 @@ xeon_dir="$HOME/.xeon"
 xeon_bin="$xeon_dir/bin"
 local_bin="$HOME/.local/bin"
 binary_name="xeo"
-download_url="https://github.com/arozoid/xeo/releases/latest/download/xeo"
+download_url="https://github.com/arozoid/xeo/releases/latest/download/xeo.txt"
 
 echo "--- installing xeo ---"
 

@@ -1,3 +1,3 @@
+#!/usr/bin/env xeo
 print "this is example2.xeo running! look! that's cool."
 print "example2.xeo signing out"
-exit

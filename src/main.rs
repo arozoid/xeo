@@ -27,13 +27,18 @@ struct Cli {
   reverse: bool,
   
   /// prints current .xeo version
-  #[arg(long)]
+  #[arg(short = 'V', long)]
   version: bool,
-    /// enable verbose debug output
-    #[arg(short, long)]
-    verbose: bool,
+  /// enable verbose debug output
+  #[arg(short, long)]
+  verbose: bool,
   
-  path: String,
+  #[arg(required = false)]
+  path: Option<String>,
+
+  /// Everything after the script name gets passed to the script
+  #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+  script_args: Vec<String>,
 }
 
 static VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -348,11 +353,12 @@ struct Context {
     reverse_mode: bool,
     verbose: bool,
     script_dir: Option<PathBuf>,
+    script_args: Vec<String>,
 }
 
 impl Context {
     fn new() -> Self {
-        Self { variables: HashMap::new(), line_map: HashMap::new(), functions: HashMap::new(), reverse_ops: Vec::new(), reverse_mode: false, verbose: false, script_dir: None }
+        Self { variables: HashMap::new(), line_map: HashMap::new(), functions: HashMap::new(), reverse_ops: Vec::new(), reverse_mode: false, verbose: false, script_dir: None, script_args: Vec::new() }
     }
 }
 
@@ -969,49 +975,45 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                 }
             }
             "wget" => {
-                if let Some(url_arg) = args.get(0) {
-                    let url = interpolate(url_arg, ctx);
-                    
-                    // Determine filename: use 2nd arg or pull from URL
-                    let filename = if let Some(f) = args.get(1) {
-                        interpolate(f, ctx)
-                    } else {
-                        url.split('/').last().unwrap_or("download.out").to_string()
-                    };
+                let url = args[0].trim_matches('"');
+                let file_path = args[1].trim_matches('"');
 
-                    println!("Downloading {} to {}...", url, filename);
+                verbose_log(ctx, &format!("downloading: {} -> {}", url, file_path));
 
-                    match reqwest::blocking::get(&url) {
-                        Ok(mut response) => {
-                            if response.status().is_success() {
-                                match std::fs::File::create(&filename) {
-                                    Ok(mut file) => {
-                                        if let Err(e) = std::io::copy(&mut response, &mut file) {
-                                            report_error(&format!("Write error: {}", e));
-                                        } else {
-                                            println!("Download complete.");
-                                        }
+                match ureq::get(url).call() {
+                    Ok(response) => {
+                        // Create the local file
+                        match std::fs::File::create(file_path) {
+                            Ok(mut file) => {
+                                // Stream the body directly to the file
+                                let mut reader = response.into_reader();
+                                match std::io::copy(&mut reader, &mut file) {
+                                    Ok(bytes) => {
+                                        verbose_log(ctx, &format!("wrote {} bytes", bytes));
                                     }
-                                    Err(e) => report_error(&format!("File error: {}", e)),
+                                    Err(e) => report_error(&format!("wget write error: {}", e)),
                                 }
-                            } else {
-                                report_error(&format!("Server returned error: {}", response.status()));
                             }
+                            Err(e) => report_error(&format!("wget disk error: {}", e)),
                         }
-                        Err(e) => report_error(&format!("Network error: {}", e)),
+                    }
+                    Err(e) => {
+                        report_error(&format!("wget failed: {}", e));
                     }
                 }
             }
             "fetch" => {
-                // Syntax: fetch <url> as $var
-                if let (Some(url_arg), Some(idx)) = (args.get(0), args.iter().position(|s| s == "as")) {
-                    let url = interpolate(url_arg, ctx);
-                    let var_name = args.get(idx + 1);
+                let url = args[0].trim_matches('"');
+                let target_var = args[1].clone(); // keep the $ if that's your style
 
-                    if let Ok(response) = reqwest::blocking::get(&url) {
-                        if let (Ok(text), Some(name)) = (response.text(), var_name) {
-                                ctx.variables.insert(name.clone(), text.trim().to_string());
-                            }
+                match ureq::get(url).call() {
+                    Ok(res) => {
+                        let text = res.into_string().unwrap_or_else(|_| "ERR_READ_BODY".to_string());
+                        verbose_log(ctx, &format!("captured {} bytes", text.len()));
+                        ctx.variables.insert(target_var, text);
+                    }
+                    Err(e) => {
+                        report_error(&format!("fetch failed: {}", e));
                     }
                 }
             }
@@ -1067,6 +1069,92 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                     }
                 } else {
                     report_error("ext requires a plugin name");
+                }
+            }
+            "read" => {
+                // 1. Check for correct number of arguments
+                if args.len() < 2 {
+                    report_error("read command requires 2 arguments: <path> <variable_name>");
+                } else {
+
+                let file_path = &args[0];
+                let target_var = &args[1];
+
+                // 2. Attempt to read the file
+                match std::fs::read_to_string(file_path) {
+                    Ok(content) => {
+                        // Success: Store the content in your variable map
+                        ctx.variables.insert(target_var.clone(), content);
+                    }
+                    Err(e) => {
+                        // Failure: Use your custom report_error function
+                        let error_msg = format!("failed to read file '{}': {}", file_path, e);
+                        report_error(&error_msg);
+                    }
+                }
+
+                }
+            }
+            "ls" => {
+                if args.len() < 2 {
+                    report_error("ls requires <path> <target_var>");
+                } else {
+                    let dir_path = &args[0];
+                    let target_var = &args[1];
+
+                    match std::fs::read_dir(dir_path) {
+                        Ok(entries) => {
+                            let files: Vec<String> = entries
+                                .filter_map(|e| e.ok())
+                                .map(|e| e.file_name().to_string_lossy().into_owned())
+                                .collect();
+                            
+                            // Join filenames with a newline \n so they are easy to parse
+                            let result = files.join("\n");
+                            ctx.variables.insert(target_var.clone(), result);
+                        }
+                        Err(e) => {
+                            report_error(&format!("failed to read dir '{}': {}", dir_path, e));
+                        }
+                    }
+                }
+            }
+            "find" => {
+                if args.len() < 3 {
+                    report_error("find usage: find $haystack_var \"needle\" $target_var");
+                } else {
+                    // 1. Get the haystack (handling the $ prefix)
+                    let haystack_key = &args[0];
+                    let haystack = if haystack_key.starts_with('$') {
+                        ctx.variables.get(haystack_key).cloned().unwrap_or_default()
+                    } else {
+                        haystack_key.clone()
+                    };
+
+                    // 2. Get the needle (the thing we are looking for)
+                    let needle = args[1].replace('"', ""); // Strip quotes if they exist
+
+                    // 3. Perform the search
+                    let target_var = &args[2];
+                    let found = if haystack.contains(&needle) { "true" } else { "false" };
+
+                    // 4. Store the result as a string
+                    ctx.variables.insert(target_var.clone(), found.to_string());
+                }
+            }
+            "args" => {
+                // Check if user provided fewer args than the script expects
+                if ctx.script_args.len() < args.len() {
+                    let msg = format!("missing {} argument(s). expected: {}", 
+                        args.len() - ctx.script_args.len(), 
+                        args.join(" ")
+                    );
+                    verbose_log(ctx, &msg); // Pass the &str slice of the formatted message
+                }
+
+                for (i, var_name) in args.iter().enumerate() {
+                    let val = ctx.script_args.get(i).cloned().unwrap_or_default();
+                    ctx.variables.insert(var_name.clone(), val);
                 }
             }
             "exit" => std::process::exit(0),
@@ -1127,11 +1215,11 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
     None
 }
 
-fn read_xeo(path: &PathBuf, reverse: bool, verbose: bool) {
+fn read_xeo(path: &PathBuf, reverse: bool, verbose: bool, script_args: Vec<String>) {
     match fs::read_to_string(path) {
         Ok(content) => {
             println!("{} {}", "[xeo] read".green(), format!("{:?}", path));
-            handle_xeo(content, reverse, path, verbose);
+            handle_xeo(content, reverse, path, verbose, script_args);
         },
         Err(e) => {
             report_error(&format!("failed to read xeo script: {}", e));
@@ -1139,7 +1227,7 @@ fn read_xeo(path: &PathBuf, reverse: bool, verbose: bool) {
     }
 }
 
-fn handle_xeo(script: String, reverse: bool, script_path: &PathBuf, verbose: bool) {
+fn handle_xeo(script: String, reverse: bool, script_path: &PathBuf, verbose: bool, script_args: Vec<String>) {
     println!("{} .xeo {}", "[xeo] interpreting".green(), "script...".green());
     let pwd = PathBuf::from(get_current_path());
     let dir = home::home_dir()
@@ -1159,6 +1247,7 @@ fn handle_xeo(script: String, reverse: bool, script_path: &PathBuf, verbose: boo
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(script_path)
     });
     ctx.script_dir = script_abs.parent().map(|p| p.to_path_buf());
+    ctx.script_args = script_args;
     // revlog will live in ~/.xeon as <script-stem>.revlog
     let revlog_path = {
         let d = get_xeon_dir();
@@ -1214,14 +1303,17 @@ fn handle_xeo(script: String, reverse: bool, script_path: &PathBuf, verbose: boo
 
 fn main() {
     let cli = Cli::parse();
-        if cli.reverse {
-            println!("{} {}", "[xeo] reversing file operations on".green(), cli.path);
-        } else {
-            println!("{} \"{}\"", "[xeo] handling file".green(), cli.path);
-        }
-        read_xeo(&PathBuf::from(cli.path), cli.reverse, cli.verbose);
-     if cli.version {
+    let path = cli.path.unwrap_or_else(|| "main.xeo".to_string());
+    if cli.version {
          println!("{}", ABOUT);
          println!("{}", VERSION);
+         return;
     }
+
+    if cli.reverse {
+        println!("{} {}", "[xeo] reversing file operations on".green(), path);
+    } else {
+        println!("{} \"{}\"", "[xeo] handling file".green(), path);
+    }
+    read_xeo(&PathBuf::from(path), cli.reverse, cli.verbose, cli.script_args);
 }

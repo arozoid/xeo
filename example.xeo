@@ -1,3 +1,4 @@
+#!/usr/bin/env xeo
 # xeo script example
 print "--- starting xeon engine ---"
 
@@ -21,10 +22,15 @@ make "user_data.tmp"
 
 # 5. modularity (running a sub-script)
 # this will use the same context and shared revlog
-use "lib/tools.xeo"
+use "example2.xeo"
 
 # 6. extension system
 # running the 'xeo' binary itself from ~/.xeon/bin
-ext xeo "subtask.xeo"
+ext xeo --version
+
+# 7. secret args
+args $s $s2 $s3
+print "secret args:"
+print "$s $s2 $s3"
 
 print "--- script finished successfully ---"

@@ -1,7 +1,7 @@
 # .xeo
 
 **.xeo** is a standalone, reversible, bash/lua-like scripting lang 
-for **xeon** built on rust, featuring 25 core commands:
+for **xeon** built on rust, featuring 28 core commands:
 
 ## core commands
 
@@ -12,6 +12,9 @@ for **xeon** built on rust, featuring 25 core commands:
 ### variables & math
 - `calc <expr> as $var`: calculates math expression and returns it as a variable.
 - `string <expr> as $var`: concatenates strings or returns string as a variable.
+- `find $haystack <needle> $bool`: looks for string in specified variable, and returns a boolean as a variable.
+- `fetch <url> $var`: sets a variable to url content.
+- `args <arg1> <arg2> <arg3> ...`: grabs any number of arguments from initial command execution
 
 ### flow control
 - `dir <path>`: changes execution path.
@@ -31,6 +34,7 @@ for **xeon** built on rust, featuring 25 core commands:
 - `link <dest> <path>`: creates a symbolic link.
 - `chmod <file>`: makes file executable.
 - `wget <url> <dest>`: download (with built-in rename semantics).
+- `ls <path> $var`: returns files in directory as a string variable.
 
 ### modularity & system
 - `use <file>`: executes another .xeo file in current scope.
@@ -47,7 +51,7 @@ for **xeon** built on rust, featuring 25 core commands:
 xeo is built with a "safety-first" mindset. every time you use a command like `make` or `mkdir`, the engine pushes the action onto a stack. if the script fails or is run in reverse mode, xeo reads the `revlog` to delete created files and undo changes in lifo (last-in, first-out) order.
 
 ### global extensions
-instead of bloating the core binary, xeo uses the `~/.xeon` directory to store plugins. using the `ext` command, you can trigger specialized rust binaries or shell scripts that reside in your home folder, making the language infinitely expandable.
+instead of bloating the core binary, xeo uses the `~/.xeon` directory to store plugins. using the `ext` command, you can trigger specialized rust binaries or shell scripts that reside in your home folder, making the language infinitely expandable, while keeping **.xeo itself below 800KB.**
 
 ### standalone simplicity
 the interpreter is a single rust binary with zero dependencies. it handles variable interpolation, basic math, and file i/o out of the box.
