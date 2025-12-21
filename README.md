@@ -51,7 +51,7 @@ for **xeon** built on rust, featuring 28 core commands:
 xeo is built with a "safety-first" mindset. every time you use a command like `make` or `mkdir`, the engine pushes the action onto a stack. if the script fails or is run in reverse mode, xeo reads the `revlog` to delete created files and undo changes in lifo (last-in, first-out) order.
 
 ### global extensions
-instead of bloating the core binary, xeo uses the `~/.xeon` directory to store plugins. using the `ext` command, you can trigger specialized rust binaries or shell scripts that reside in your home folder, making the language infinitely expandable, while keeping **.xeo itself below 800KB.**
+instead of bloating the core binary, xeo uses the `~/.xeon` directory to store plugins. using the `ext` command, you can trigger specialized rust binaries or shell scripts that reside in your home folder, making the language infinitely expandable, while keeping **.xeo itself around 1MB.**
 
 ### standalone simplicity
 the interpreter is a single rust binary with zero dependencies. it handles variable interpolation, basic math, and file i/o out of the box.
