@@ -142,7 +142,7 @@ fn lex_lines(lines: &str) -> Vec<Vec<Token>> {
 enum ASTNodeKind {
     Command { name: String, args: Vec<String> },
     Repeat { times: String, var: Option<String>, body: Vec<ASTNode> },
-    Func { name: String, body: Vec<ASTNode> },
+    Func { name: String, params: Vec<String>, body: Vec<ASTNode> },
     If { condition: String, body: Vec<ASTNode>, else_body: Vec<ASTNode> },
 }
 
@@ -309,15 +309,15 @@ fn parse_block(lines: &[(usize, Vec<Token>)], start_idx: usize, end_idx: usize) 
                 continue;
             }
             Some(Token::Command(cmd)) if cmd == "func" => {
-                let name = tokens.get(1).map(|t| match t {
-                    Token::StringLiteral(s) => s.clone(),
-                    Token::Command(s) => s.clone(),
-                    _ => "unnamed".to_string(),
-                }).unwrap_or_else(|| "unnamed".to_string());
+                // collect name and optional parameter names from the func header
+                let parts = tokens_to_args(&tokens);
+                // parts[0] == "func" normally
+                let name = parts.get(1).cloned().unwrap_or_else(|| "unnamed".to_string());
+                let params = if parts.len() > 2 { parts[2..].to_vec() } else { Vec::new() };
 
                 let (body, consumed) = parse_block(lines, i+1, end_idx);
                 ast.push(ASTNode {
-                    kind: ASTNodeKind::Func { name, body },
+                    kind: ASTNodeKind::Func { name, params, body },
                     line_number: *line_number,
                 });
                 i = consumed;
@@ -348,7 +348,8 @@ fn parse_tokens(lines: Vec<Vec<Token>>) -> Vec<ASTNode> {
 struct Context {
     variables: HashMap<String, String>,
     line_map: HashMap<usize, *const ASTNode>, // line number -> AST node
-    functions: HashMap<String, Vec<ASTNode>>,
+    // function name -> (params, body)
+    functions: HashMap<String, (Vec<String>, Vec<ASTNode>)>,
     reverse_ops: Vec<ReverseOp>,
     reverse_mode: bool,
     verbose: bool,
@@ -459,34 +460,24 @@ fn make_backup(ctx: &Context, orig: &str) -> Option<String> {
     let basename = PathBuf::from(&orig)
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|s| s.to_string()) // Convert the reference to an owned String
+        .map(|s| s.to_string())
         .unwrap_or_else(|| "item".to_string());
+    
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let backup_name = format!("{}_{}", ts, basename);
     let backup_path = recycle.join(backup_name);
     let backup_str = backup_path.to_string_lossy().to_string();
 
-    // Try to rename (fast), fall back to copy
-    if std::fs::rename(orig, &backup_str).is_ok() {
-        if ctx.verbose {
-            verbose_log(ctx, &format!("make_backup renamed {} -> {}", orig, backup_str));
-        }
-        return Some(backup_str);
-    }
-
-    // not renamable; try copying file
+    // ONLY COPY. Do not rename, do not remove_file.
     if let Ok(meta) = std::fs::metadata(orig) {
         if meta.is_file() {
             if std::fs::copy(orig, &backup_str).is_ok() {
                 if ctx.verbose {
-                    verbose_log(ctx, &format!("make_backup copied {} -> {}", orig, backup_str));
+                    verbose_log(ctx, &format!("make_backup backed up {} to {}", orig, backup_str));
                 }
-                // remove original
-                let _ = std::fs::remove_file(orig);
                 return Some(backup_str);
             }
         } else if meta.is_dir() {
-            // fallback: try to rename dir (already failed) -> report error
             report_error(&format!("cannot backup directory {}", orig));
             return None;
         }
@@ -578,8 +569,8 @@ fn execute_ast(ast: &[ASTNode], ctx: &mut Context) {
 
     // register function definitions so `run` can find them
     for node in ast {
-        if let ASTNodeKind::Func { name, body } = &node.kind {
-            ctx.functions.insert(name.clone(), body.clone());
+        if let ASTNodeKind::Func { name, params, body } = &node.kind {
+            ctx.functions.insert(name.clone(), (params.clone(), body.clone()));
         }
     }
 
@@ -640,7 +631,45 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
 
                     let value = evaluated_parts.join("");
                     if let Some(var_name) = var_name_opt {
-                        ctx.variables.insert(var_name, value);
+                        // Support indirection: `string "..." as $$var` should set the
+                        // variable whose name is the value of `$var` (i.e. create `$<value>`).
+                        // Tokenization may produce two variable tokens for `$$var` ("$" then "$var").
+                        if var_name.starts_with("$$") {
+                            // e.g. var_name == "$$var" -> lookup $var
+                            let inner = &var_name[2..];
+                            let lookup_key = format!("${}", inner);
+                            if let Some(target) = ctx.variables.get(&lookup_key) {
+                                let target_key = format!("${}", target);
+                                ctx.variables.insert(target_key, value);
+                            } else {
+                                report_error(&format!("indirection failed: {} not set", lookup_key));
+                            }
+                        } else if var_name == "$" {
+                            // tokenization case: `$$var` -> tokens ["$", "$var"] so var_name_opt == "$"
+                            if let Some(as_idx) = args.iter().position(|s| s == "as") {
+                                if as_idx + 2 < args.len() {
+                                    let next = args[as_idx + 2].clone();
+                                    if next.starts_with('$') {
+                                        let lookup_key = next;
+                                        if let Some(target) = ctx.variables.get(&lookup_key) {
+                                            let target_key = format!("${}", target);
+                                            ctx.variables.insert(target_key, value);
+                                        } else {
+                                            report_error(&format!("indirection failed: {} not set", lookup_key));
+                                        }
+                                    } else {
+                                        ctx.variables.insert(var_name, value);
+                                    }
+                                } else {
+                                    ctx.variables.insert(var_name, value);
+                                }
+                            } else {
+                                ctx.variables.insert(var_name, value);
+                            }
+                        } else {
+                            // normal case: set variable directly (var_name includes leading $)
+                            ctx.variables.insert(var_name, value);
+                        }
                     }
                 }
             }
@@ -793,6 +822,7 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                 if let (Some(s), Some(d)) = (args.get(0), args.get(1)) {
                     let src = interpolate(s, ctx);
                     let dest = interpolate(d, ctx);
+                    // Try direct rename first
                     match std::fs::rename(&src, &dest) {
                         Ok(_) => {
                             if !ctx.reverse_mode {
@@ -801,7 +831,69 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                                 ctx.reverse_ops.push(ReverseOp::Move { src: abs_dest.clone(), dest: abs_src.clone() });
                             }
                         }
-                        Err(e) => report_error(&format!("move error: {} -> {}: {}", src, dest, e)),
+                        Err(e) => {
+                            // If both src and dest are directories, move contents of src into dest, then remove src
+                            let src_meta = std::fs::metadata(&src).ok();
+                            let dest_meta = std::fs::metadata(&dest).ok();
+                            if src_meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) && dest_meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+                                // iterate entries in src and move into dest
+                                if let Ok(entries) = std::fs::read_dir(&src) {
+                                    for ent in entries.filter_map(|e| e.ok()) {
+                                        let ent_path = ent.path();
+                                        if let Some(name) = ent_path.file_name().and_then(|s| s.to_str()) {
+                                            let dest_entry = Path::new(&dest).join(name);
+                                            let dest_entry_str = dest_entry.display().to_string();
+                                            let ent_path_str = ent_path.display().to_string();
+
+                                            // attempt rename; on cross-filesystem, fallback to copy/remove
+                                            if std::fs::rename(&ent_path, &dest_entry).is_err() {
+                                                // fallback
+                                                if let Ok(meta) = std::fs::metadata(&ent_path) {
+                                                    if meta.is_dir() {
+                                                        // copy dir recursively
+                                                        if let Err(e2) = fs_extra::dir::copy(&ent_path, &dest, &fs_extra::dir::CopyOptions::new()) {
+                                                            report_error(&format!("move (copy) error for dir {} -> {}: {}", ent_path_str, dest, e2));
+                                                            continue;
+                                                        }
+                                                        // remove original
+                                                        if let Err(e2) = std::fs::remove_dir_all(&ent_path) {
+                                                            report_error(&format!("failed to remove original dir {}: {}", ent_path_str, e2));
+                                                        }
+                                                    } else {
+                                                        if let Err(e2) = std::fs::copy(&ent_path, &dest_entry) {
+                                                            report_error(&format!("move (copy) error for file {} -> {}: {}", ent_path_str, dest_entry_str, e2));
+                                                            continue;
+                                                        }
+                                                        if let Err(e2) = std::fs::remove_file(&ent_path) {
+                                                            report_error(&format!("failed to remove original file {}: {}", ent_path_str, e2));
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            if !ctx.reverse_mode {
+                                                // record reverse move: move dest_entry back to original ent_path
+                                                let abs_dest_entry = if Path::new(&dest_entry_str).is_absolute() { dest_entry_str.clone() } else { std::env::current_dir().map(|cwd| cwd.join(&dest_entry_str).display().to_string()).unwrap_or(dest_entry_str.clone()) };
+                                                let abs_ent_path = if Path::new(&ent_path_str).is_absolute() { ent_path_str.clone() } else { std::env::current_dir().map(|cwd| cwd.join(&ent_path_str).display().to_string()).unwrap_or(ent_path_str.clone()) };
+                                                ctx.reverse_ops.push(ReverseOp::Move { src: abs_dest_entry, dest: abs_ent_path });
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // backup (move) the now-empty src directory into recycle so reverse can restore it
+                                if !ctx.reverse_mode {
+                                    if let Some(backup) = make_backup(ctx, &src) {
+                                        ctx.reverse_ops.push(ReverseOp::Restore { backup, original: src.clone() });
+                                    }
+                                } else {
+                                    // during reverse-mode we should remove the empty src if it still exists
+                                    let _ = std::fs::remove_dir_all(&src);
+                                }
+                            } else {
+                                report_error(&format!("move error: {} -> {}: {}", src, dest, e));
+                            }
+                        }
                     }
                 }
             }
@@ -863,13 +955,38 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                     let path = interpolate(p, ctx);
                     #[cfg(unix)] {
                         use std::os::unix::fs::PermissionsExt;
+                        // default mode to set — keep legacy behaviour
+                        let set_mode = 0o755;
                         match std::fs::metadata(&path) {
                             Ok(meta) => {
-                                let prev_mode = meta.permissions().mode();
-                                if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
-                                    report_error(&format!("chmod error: {}", e));
-                                } else if !ctx.reverse_mode {
-                                    ctx.reverse_ops.push(ReverseOp::Chmod { path: path.clone(), mode: prev_mode });
+                                if meta.is_dir() {
+                                    // recurse into directory and chmod each entry, recording previous modes
+                                    let mut stack: Vec<PathBuf> = vec![PathBuf::from(&path)];
+                                    while let Some(curr) = stack.pop() {
+                                        if let Ok(m2) = std::fs::metadata(&curr) {
+                                            let prev_mode = m2.permissions().mode();
+                                            if let Err(e) = std::fs::set_permissions(&curr, std::fs::Permissions::from_mode(set_mode)) {
+                                                report_error(&format!("chmod error on {}: {}", curr.display(), e));
+                                            } else if !ctx.reverse_mode {
+                                                ctx.reverse_ops.push(ReverseOp::Chmod { path: curr.display().to_string(), mode: prev_mode });
+                                            }
+
+                                            if m2.is_dir() {
+                                                if let Ok(rd) = std::fs::read_dir(&curr) {
+                                                    for ent in rd.filter_map(|e| e.ok()) {
+                                                        stack.push(ent.path());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let prev_mode = meta.permissions().mode();
+                                    if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(set_mode)) {
+                                        report_error(&format!("chmod error: {}", e));
+                                    } else if !ctx.reverse_mode {
+                                        ctx.reverse_ops.push(ReverseOp::Chmod { path: path.clone(), mode: prev_mode });
+                                    }
                                 }
                             }
                             Err(e) => report_error(&format!("chmod metadata error: {}", e)),
@@ -912,15 +1029,22 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                     let path = interpolate(f, ctx);
                     let text = interpolate(t, ctx);
                     use std::io::Write;
-                    // backup original before modifying
+
                     if std::fs::metadata(&path).is_ok() && !ctx.reverse_mode {
                         if let Some(backup) = make_backup(ctx, &path) {
                             ctx.reverse_ops.push(ReverseOp::Restore { backup: backup.clone(), original: path.clone() });
                         }
                     }
-                    // Use create(true) so append will create the file if it doesn't exist
-                    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+
+                    // Explicitly set append(true) and ensure truncate is NOT active
+                    let result = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path);
+
+                    match result {
                         Ok(mut file) => {
+                            // Using writeln! adds the text + a newline
                             if let Err(e) = writeln!(file, "{}", text) {
                                 report_error(&format!("append error: {}", e));
                             }
@@ -963,11 +1087,27 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
             }
             "run" => {
                 if let Some(fname) = args.get(0) {
-                    // 1. Scope the borrow: get the body and CLONE it
-                    let body = ctx.functions.get(fname).cloned();
+                    // 1. Get the function entry (params + body)
+                    let entry = ctx.functions.get(fname).cloned();
 
-                    // 2. Now the borrow of 'ctx' is over, so we can pass 'ctx' mutably
-                    if let Some(nodes) = body {
+                    if let Some((params, nodes)) = entry {
+                        // 2. Map the "run" arguments into named params or positional $1/$2 fallback
+                        if !params.is_empty() {
+                            for (i, val) in args.iter().skip(1).enumerate() {
+                                if let Some(param_name) = params.get(i) {
+                                    let clean_val = val.trim_matches('"').to_string();
+                                    ctx.variables.insert(param_name.clone(), clean_val);
+                                }
+                            }
+                        } else {
+                            for (i, val) in args.iter().skip(1).enumerate() {
+                                let pos_name = format!("${}", i + 1); // Creates $1, $2, etc.
+                                let clean_val = val.trim_matches('"').to_string();
+                                ctx.variables.insert(pos_name, clean_val);
+                            }
+                        }
+
+                        // 3. Execute function body
                         execute_ast(&nodes, ctx);
                     } else {
                         report_error(&format!("run error: unknown function {}", fname));
@@ -1072,50 +1212,91 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                 }
             }
             "read" => {
-                // 1. Check for correct number of arguments
-                if args.len() < 2 {
-                    report_error("read command requires 2 arguments: <path> <variable_name>");
+                // Accept: read <path> as $var   OR   read <path> $var   OR   read <path> <var>
+                if args.is_empty() {
+                    report_error("read requires at least a path and a target variable");
                 } else {
+                    // determine variable token after optional `as`
+                    let var_opt = if let Some(pos) = args.iter().position(|s| s == "as") {
+                        args.get(pos + 1).cloned()
+                    } else if args.len() >= 2 {
+                        args.get(1).cloned()
+                    } else {
+                        None
+                    };
 
-                let file_path = &args[0];
-                let target_var = &args[1];
+                    if var_opt.is_none() {
+                        report_error("read requires a target variable: read <path> as $var");
+                    } else {
+                        let file_path_raw = args.get(0).unwrap().clone();
+                        let file_path = interpolate(&file_path_raw, ctx);
 
-                // 2. Attempt to read the file
-                match std::fs::read_to_string(file_path) {
-                    Ok(content) => {
-                        // Success: Store the content in your variable map
-                        ctx.variables.insert(target_var.clone(), content);
+                        match std::fs::read_to_string(&file_path) {
+                            Ok(content) => {
+                                // normalize target var to include leading '$'
+                                let mut target_var = var_opt.unwrap();
+                                if !target_var.starts_with('$') {
+                                    target_var = format!("${}", target_var);
+                                }
+                                ctx.variables.insert(target_var, content);
+                            }
+                            Err(e) => {
+                                report_error(&format!("failed to read file '{}': {}", file_path, e));
+                            }
+                        }
                     }
-                    Err(e) => {
-                        // Failure: Use your custom report_error function
-                        let error_msg = format!("failed to read file '{}': {}", file_path, e);
-                        report_error(&error_msg);
-                    }
-                }
-
                 }
             }
             "ls" => {
                 if args.len() < 2 {
-                    report_error("ls requires <path> <target_var>");
+                    report_error("ls requires <path> <target_prefix>");
                 } else {
-                    let dir_path = &args[0];
-                    let target_var = &args[1];
+                    let dir_raw = args[0].clone();
+                    let prefix_token = args[1].clone();
+                    let dir_path = interpolate(&dir_raw, ctx);
 
-                    match std::fs::read_dir(dir_path) {
+                    // normalize prefix (strip leading $ if provided)
+                    let prefix = prefix_token.trim_start_matches('$').to_string();
+
+                    // If we previously recorded a total for this prefix, remove prior numbered keys
+                    let prev_total_key = format!("${}total", prefix);
+                    if let Some(prev_total) = ctx.variables.get(&prev_total_key) {
+                        if let Ok(n) = prev_total.parse::<usize>() {
+                            for i in 1..=n {
+                                ctx.variables.remove(&format!("${}{}", prefix, i));
+                            }
+                        }
+                        // also remove previous list and total entries
+                        ctx.variables.remove(&prev_total_key);
+                        ctx.variables.remove(&format!("${}list", prefix));
+                    }
+
+                    match std::fs::read_dir(&dir_path) {
                         Ok(entries) => {
-                            let files: Vec<String> = entries
-                                .filter_map(|e| e.ok())
-                                .map(|e| e.file_name().to_string_lossy().into_owned())
-                                .collect();
-                            
-                            // Join filenames with a newline \n so they are easy to parse
-                            let result = files.join("\n");
-                            ctx.variables.insert(target_var.clone(), result);
+                            let mut files: Vec<String> = Vec::new();
+                            for ent in entries.filter_map(|e| e.ok()) {
+                                files.push(ent.file_name().to_string_lossy().into_owned());
+                            }
+
+                            let count = files.len();
+
+                            // store list and total with leading $
+                            let total_key = format!("${}total", prefix);
+                            let list_key = format!("${}list", prefix);
+                            ctx.variables.insert(list_key.clone(), files.join("\n"));
+                            ctx.variables.insert(total_key.clone(), count.to_string());
+
+                            // store numbered entries: $f1, $f2, ...
+                            for (i, filename) in files.iter().enumerate() {
+                                let key = format!("${}{}", prefix, i + 1);
+                                ctx.variables.insert(key, filename.to_string());
+                            }
+
+                            if ctx.verbose {
+                                verbose_log(ctx, &format!("ls: found {} files in {}", count, dir_path));
+                            }
                         }
-                        Err(e) => {
-                            report_error(&format!("failed to read dir '{}': {}", dir_path, e));
-                        }
+                        Err(e) => report_error(&format!("failed to read dir '{}': {}", dir_path, e)),
                     }
                 }
             }
@@ -1155,6 +1336,129 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                 for (i, var_name) in args.iter().enumerate() {
                     let val = ctx.script_args.get(i).cloned().unwrap_or_default();
                     ctx.variables.insert(var_name.clone(), val);
+                }
+            }
+            "extc" => {
+                // Check if we have at least a variable name and a command
+                if args.len() >= 2 {
+                    // Preserve leading `$` on the stored variable key for consistency
+                    let mut target_var = args[0].clone();
+                    if !target_var.starts_with('$') {
+                        target_var = format!("${}", target_var);
+                    }
+
+                    let plugin_token = args[1].clone();
+                    let plugin_name = interpolate(&plugin_token, ctx);
+
+                    // Disallow path components in the plugin name — it must be a bare filename
+                    if plugin_name.contains('/') || plugin_name.contains('\\') {
+                        report_error("extc plugin name must be a bare filename located in ~/.xeon/bin");
+                    } else {
+                        // Construct path to ~/.xeon/bin/<plugin_name>
+                        let mut exe_path = home::home_dir()
+                            .map(|p| p.join(".xeon").join("bin"))
+                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        exe_path.push(&plugin_name);
+
+                        #[cfg(windows)]
+                        if exe_path.extension().is_none() {
+                            exe_path.set_extension("exe");
+                        }
+
+                        if exe_path.exists() {
+                            // Arguments start at index 2 for extc
+                            let plugin_args: Vec<String> = args[2..].iter()
+                                .map(|a| interpolate(a, ctx))
+                                .collect();
+
+                            if ctx.verbose {
+                                verbose_log(ctx, &format!("capturing extension: {:?} -> {}", exe_path, target_var));
+                            }
+
+                            // Execute and capture stdout
+                            let output = std::process::Command::new(&exe_path)
+                                .args(plugin_args)
+                                .stdin(std::process::Stdio::null()) // Usually don't want stdin for capture
+                                .stderr(std::process::Stdio::inherit()) // Let errors go to terminal
+                                .output(); // This waits and captures stdout/stderr
+
+                            match output {
+                                Ok(out) => {
+                                    // Convert bytes to string (lossy handles weird characters safely)
+                                    let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+                                    // Store the result in your context using the $-prefixed key
+                                    ctx.variables.insert(target_var, result);
+
+                                    if !out.status.success() && ctx.verbose {
+                                        verbose_log(ctx, &format!("extension {} failed with code: {}", plugin_name, out.status));
+                                    }
+                                }
+                                Err(e) => report_error(&format!("failed to start {}: {}", plugin_name, e)),
+                            }
+                        } else {
+                            report_error(&format!("binary not found in ~/.xeon/bin: {}", plugin_name));
+                        }
+                    }
+                } else {
+                    report_error("extc requires a variable name and a plugin name: extc $var cmd args...");
+                }
+            }
+            "get" => {
+                if !args.is_empty() {
+                    let as_idx = args.iter().position(|s| s == "as");
+
+                    // 1. Identify Expression Parts and Target Variable
+                    let (expr_parts, var_name_opt) = if let Some(i) = as_idx {
+                        (args[..i].to_vec(), args.get(i + 1).cloned())
+                    } else {
+                        report_error("get requires 'as $var' syntax");
+                        return None;
+                    };
+
+                    // 2. Evaluate Parts (just like your string command)
+                    let mut evaluated_parts: Vec<String> = Vec::new();
+                    let mut i = 0;
+                    while i < expr_parts.len() {
+                        if expr_parts[i] == "+" {
+                            i += 1;
+                            continue;
+                        }
+                        evaluated_parts.push(interpolate(&expr_parts[i], ctx));
+                        i += 1;
+                    }
+
+                    // 3. The built key (e.g., "f1")
+                    let lookup_key_raw = evaluated_parts.join("");
+                    
+                    // Ensure the lookup key has a '$' prefix if your interpolate/storage expects it
+                    // Based on your string code, keys in ctx.variables seem to include the '$'
+                    let lookup_key = if lookup_key_raw.starts_with('$') { 
+                        lookup_key_raw 
+                    } else { 
+                        format!("${}", lookup_key_raw) 
+                    };
+
+                    if let Some(var_name) = var_name_opt {
+                        // 4. Perform the "Get" lookup
+                        let value = ctx.variables.get(&lookup_key).cloned().unwrap_or_default();
+                        
+                        // 5. Store in the target variable
+                        // (Using your string command's standard variable insertion logic)
+                        ctx.variables.insert(var_name, value);
+                    }
+                }
+            }
+            "sleep" => {
+                if let Some(duration_str) = args.get(0) {
+                    let ms_str = interpolate(duration_str, ctx);
+                    if let Ok(ms) = ms_str.parse::<u64>() {
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    } else {
+                        report_error(&format!("sleep: invalid duration '{}'", ms_str));
+                    }
+                } else {
+                    report_error("sleep requires a duration in milliseconds");
                 }
             }
             "exit" => std::process::exit(0),

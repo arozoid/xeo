@@ -1,6 +1,6 @@
 [package]
 name = "xeo"
-version = "2.2.2"
+version = "3.0.0"
 edition = "2024"
 
 [dependencies]
@@ -9,10 +9,14 @@ colored = ">=2.1"
 home = ">=0.5"
 evalexpr = ">=8.1"
 ureq = { version = "2.9", features = ["tls"] }
+fs_extra = ">=1.3"
 
 [profile.release]
 opt-level = "z"     # Optimize for size ('s' or 'z')
-lto = true          # Enable Link Time Optimization
+debug = false
+lto = "fat"          # Enable Link Time Optimization (fat LTO for best size)
 codegen-units = 1   # Reduce parallel code generation for better optimization
 panic = "abort"     # Remove stack unwinding code (saves ~10% size)
+overflow-checks = false
+incremental = false
 strip = true        # Automatically strip symbols (same as running `strip` command)

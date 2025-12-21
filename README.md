@@ -1,29 +1,31 @@
 # .xeo
 
 **.xeo** is a standalone, reversible, bash/lua-like scripting lang 
-for **xeon** built on rust, featuring 28 core commands:
+for **xeon** built on rust, featuring 32 core commands:
 
 ## core commands
 
-### output & input
+### 2 output & input commands
 - `print <args>`: writes all args on terminal.
 - `ask $var <prompt>`: asks the user a question, and returns the input as a variable.
 
-### variables & math
+### 6 variables & math commands
 - `calc <expr> as $var`: calculates math expression and returns it as a variable.
 - `string <expr> as $var`: concatenates strings or returns string as a variable.
 - `find $haystack <needle> $bool`: looks for string in specified variable, and returns a boolean as a variable.
 - `fetch <url> $var`: sets a variable to url content.
-- `args $arg1 $arg2 $arg3 ...`: grabs any number of arguments from initial command execution
+- `args $arg1 $arg2 $arg3 ... $argN`: grabs any number of arguments from initial command execution
+- `get <expr> as $var`: evaluates the string concatenation expression to form a variable name, then retrieves the value of that variable and returns it as another variable.
 
-### flow control
+### 6 flow control commands
 - `dir <path>`: changes execution path.
 - `go <line>`: goes to line number in code.
+- `sleep <ms>`: pauses the code for specified amount of milliseconds. (1 second = 1000ms)
 - `if <bool>`: executes the commands under it if the condition is met.
-- `repeat <count> as <var>`: repeats the commands under it a specific number of times, while providing an iterator.
+- `repeat <count> as $var`: repeats the commands under it a specific number of times, while providing an iterator that starts at 1.
 - `exit`: terminates the script execution.
 
-### file system (reversible)
+### 12 file system commands (reversible)
 - `make <file>`: creates a file and logs it for potential reversal.
 - `mkdir <dir>`: creates a directory and logs it for potential reversal.
 - `move <src> <dest>`: moves a file or directory.
@@ -34,14 +36,19 @@ for **xeon** built on rust, featuring 28 core commands:
 - `link <dest> <path>`: creates a symbolic link.
 - `chmod <file>`: makes file executable.
 - `wget <url> <dest>`: download (with built-in rename semantics).
-- `ls <path> $var`: returns files in directory as a string variable.
+- `read <file> as $var`: reads file content and returns as variable.
+- `ls <path> <prefix>`: scans a directory and maps its contents into the variable table:
+    - `$<prefix>total`: the total count of files found.
+    - `$<prefix>list`: all filenames joined by newlines.
+    - `$<prefix>1` through `$<prefix>N`: individual variables for each file by its index.
 
-### modularity & system
+### 6 modularity & system commands
 - `use <file>`: executes another .xeo file in current scope.
-- `ext <plugin>`: runs a global extension from ~/.xeon/bin.
-- `func <name>`: defines a reusable block of code.
+- `ext <plugin> <arg1> <arg2> ... <argN>`: runs a global extension from ~/.xeon/bin.
+- `extc $var <plugin> <arg1> <arg2> ... <argN>`
+- `func <name> $arg1 $arg2 ... $argN`: defines a reusable block of code with optional arguments.
 - `end`: ends an if, repeat, or function statement.
-- `run <name>`: executes a previously defined function.
+- `run <name> <arg1> <arg2> ... <argN>`: Executes a previously defined function (args optional).
 
 ---
 

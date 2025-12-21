@@ -1,36 +1,74 @@
 #!/usr/bin/env xeo
-# xeo script example
+-- xeo script example
 print "--- starting xeon engine ---"
 
-# 1. basic variables and math
+-- 1. basic variables and math
 calc 10 + 5 as $base_val
 calc $base_val * 2 as $total
 print "the calculated total is: " $total
 
-# 2. string manipulation
+-- 2. string manipulation
 string "hello" + "_" + "world" as $greeting
 print "message: " $greeting
 
-# 3. user interaction
+-- 3. user interaction
 ask $user_name "what is your name? "
 print "welcome to the engine, " $user_name
 
-# 4. the reversible undo engine
+-- 4. the reversible undo engine
 print "creating files (this is logged in .revlog)..."
 make "session_log.txt"
 make "user_data.tmp"
 
-# 5. modularity (running a sub-script)
-# this will use the same context and shared revlog
+-- 5. reading and writing files
+append "session_log.txt" "user: " + $user_name + "\n"
+print "appended user name to session_log.txt"
+read "session_log.txt" as $log_content
+print "current log content:" 
+print $log_content
+
+print "printing 5 files from the current directory with 200ms delay:"
+ls "./" $f
+repeat 5 as $i
+    get "f" + $i as $fname
+    print "- " $fname
+    sleep 200
+end
+
+-- 5. modularity (running a sub-script)
+-- this will use the same context and shared revlog
+print ""
 use "example2.xeo"
+print ""
 
-# 6. extension system
-# running the 'xeo' binary itself from ~/.xeon/bin
+-- 6. extension system
+-- running the 'xeo' binary itself from ~/.xeon/bin
+-- also storing output in $ext_output
 ext xeo --version
+print ""
+extc $ext_output xeo --version
+print "xeo version from extension call: " 
+print $ext_output
+print ""
 
-# 7. secret args
+-- 7. functions
+-- functions and $$ keyword
+func greet_user $name
+    print "greet_user function says: Hello, " $name "!"
+end
+run greet_user "World"
+
+func create_foo_var $var
+    string "foo_value" as $$var
+end
+print "running create_foo_var to create variable my_foo using $$var..."
+run create_foo_var "my_foo"
+print "created variable my_foo with value: " $my_foo
+
+-- 8. secret args
 args $s $s2 $s3
 print "secret args:"
 print "$s $s2 $s3"
 
 print "--- script finished successfully ---"
+print "tip: you can run xeo example.xeo -r to undo, and xeo example.xeo -v for verbose!"

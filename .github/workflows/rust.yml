@@ -45,10 +45,11 @@ jobs:
     - name: Install UPX
       if: matrix.os != 'windows-latest'
       run: |
-        if [ "$RUNNER_OS" == "Linux" ]; then
+        if [ "$RUNNER_OS" = "Linux" ]; then
           sudo apt-get update && sudo apt-get install -y upx
-        elif [ "$RUNNER_OS" == "macOS" ]; then
-          brew install upx
+        elif [ "$RUNNER_OS" = "macOS" ]; then
+          brew update || true
+          brew install upx || true
         fi
 
     - name: Build Release
@@ -56,15 +57,47 @@ jobs:
       env:
         CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
+    - name: Set paths
+      id: paths
+      run: |
+        case "${{ matrix.os }}" in
+          macos-latest)
+            bin="target/${{ matrix.target }}/release/xeo"
+            ;;
+          windows-latest)
+            bin="target/${{ matrix.target }}/release/xeo.exe"
+            ;;
+          *)
+            bin="target/${{ matrix.target }}/release/xeo"
+            ;;
+        esac
+        echo "bin=$bin" >> "$GITHUB_OUTPUT"
+        echo "artifact=${{ matrix.artifact_name }}" >> "$GITHUB_OUTPUT"
+
     - name: Compress with UPX
       shell: bash
+      if: matrix.os != 'windows-latest'
       run: |
-        BIN_PATH="target/${{ matrix.target }}/release/${{ matrix.artifact_name == 'xeo-windows.exe' && 'xeo.exe' || 'xeo' }}"
+        BIN_PATH="${{ steps.paths.outputs.bin }}"
         if [ "${{ matrix.os }}" = "macos-latest" ]; then
-          upx --brute --force-macos "$BIN_PATH"
+          # on macOS, use normal upx and preserve executable bits
+          chmod +x "$BIN_PATH"
+          upx --brute --force "$BIN_PATH" || upx --best "$BIN_PATH" || true
         else
-          upx --brute --lzma "$BIN_PATH"
+          chmod +x "$BIN_PATH"
+          upx --brute --lzma "$BIN_PATH" || true
         fi
+
+    - name: macOS codesign and quarantine
+      if: matrix.os == 'macos-latest'
+      shell: bash
+      run: |
+        BIN_PATH="${{ steps.paths.outputs.bin }}"
+        chmod +x "$BIN_PATH"
+        # Ad-hoc sign so Gatekeeper recognizes a signature (useful for notarization flows)
+        codesign --force --options runtime --timestamp --sign - "$BIN_PATH" || true
+        # Set com.apple.quarantine attribute to force quarantine behavior
+        xattr -w com.apple.quarantine "0083;$(date +%s);xeo" "$BIN_PATH" || true
 
     - name: Smoke Test
       if: matrix.os != 'windows-latest' && matrix.target != 'aarch64-unknown-linux-gnu'
@@ -78,14 +111,16 @@ jobs:
     - name: Prepare Artifact
       shell: bash
       run: |
-        cd target/${{ matrix.target }}/release
-        mv ${{ matrix.artifact_name == 'xeo-windows.exe' && 'xeo.exe' || 'xeo' }} ${{ matrix.artifact_name }}
+        BIN_PATH="${{ steps.paths.outputs.bin }}"
+        ART_NAME="${{ steps.paths.outputs.artifact }}"
+        mkdir -p target/${{ matrix.target }}/release
+        cp "$BIN_PATH" "target/${{ matrix.target }}/release/$ART_NAME"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.artifact_name }}
-        path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        name: ${{ steps.paths.outputs.artifact }}
+        path: target/${{ matrix.target }}/release/${{ steps.paths.outputs.artifact }}
 
   release:
     name: Create Release
@@ -106,8 +141,4 @@ jobs:
         with:
           files: ./dist/*
           generate_release_notes: true
-<<<<<<< HEAD
           draft: true
-=======
-          draft: true
->>>>>>> 275db7825ea352a7741d182ac5f1341ee02636a4
