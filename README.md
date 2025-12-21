@@ -35,10 +35,11 @@ for **xeon** built on rust, featuring 28 core commands:
 - `chmod <file>`: makes file executable.
 - `wget <url> <dest>`: download (with built-in rename semantics).
 - `ls <path> $var`: returns files in directory as a string variable.
+- `read <file> $var`: returns file contents as a string variable.
 
 ### modularity & system
 - `use <file>`: executes another .xeo file in current scope.
-- `ext <plugin>`: runs a global extension from ~/.xeon/bin.
+- `ext <plugin>`: runs a global extension from ~/.xeon/bin. (extra command, but still comes with binary)
 - `func <name>`: defines a reusable block of code.
 - `end`: ends an if, repeat, or function statement.
 - `run <name>`: executes a previously defined function.
