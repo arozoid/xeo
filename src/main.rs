@@ -550,6 +550,15 @@ fn execute_reverse_ops(mut ops: Vec<ReverseOp>, base_dir: Option<PathBuf>, verbo
                     use std::os::unix::fs::PermissionsExt;
                     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
                 }
+                #[cfg(not(unix))] {
+                    // On Windows we stored previous readonly as 0/1 in mode. Restore it.
+                    let prev_readonly = mode != 0;
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        let mut perms = meta.permissions();
+                        perms.set_readonly(prev_readonly);
+                        let _ = std::fs::set_permissions(&path, perms);
+                    }
+                }
             }
             ReverseOp::Chdir { from, to: _ } => {
                 if verbose { println!("{} CHDIR -> {}", "[xeo] dbg:".cyan(), from); }
@@ -986,6 +995,54 @@ fn execute_node(node: &ASTNode, ctx: &mut Context) -> Option<usize> {
                                         report_error(&format!("chmod error: {}", e));
                                     } else if !ctx.reverse_mode {
                                         ctx.reverse_ops.push(ReverseOp::Chmod { path: path.clone(), mode: prev_mode });
+                                    }
+                                }
+                            }
+                            Err(e) => report_error(&format!("chmod metadata error: {}", e)),
+                        }
+                    }
+                    #[cfg(not(unix))] {
+                        // On non-Unix (Windows), emulate chmod by setting the readonly flag based on owner write bit
+                        // default mode to set — keep legacy behaviour (treat 0o755 as writable)
+                        let set_mode = 0o755;
+                        match std::fs::metadata(&path) {
+                            Ok(meta) => {
+                                if meta.is_dir() {
+                                    let mut stack: Vec<PathBuf> = vec![PathBuf::from(&path)];
+                                    while let Some(curr) = stack.pop() {
+                                        if let Ok(m2) = std::fs::metadata(&curr) {
+                                            let prev_readonly = m2.permissions().readonly();
+                                            let readonly = (set_mode & 0o200) == 0; // if owner-write not set -> readonly
+                                            if let Err(e) = std::fs::set_permissions(&curr, {
+                                                let mut perms = m2.permissions();
+                                                perms.set_readonly(readonly);
+                                                perms
+                                            }) {
+                                                report_error(&format!("chmod (win) error on {}: {}", curr.display(), e));
+                                            } else if !ctx.reverse_mode {
+                                                ctx.reverse_ops.push(ReverseOp::Chmod { path: curr.display().to_string(), mode: if prev_readonly { 1 } else { 0 } });
+                                            }
+
+                                            if m2.is_dir() {
+                                                if let Ok(rd) = std::fs::read_dir(&curr) {
+                                                    for ent in rd.filter_map(|e| e.ok()) {
+                                                        stack.push(ent.path());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let prev_readonly = meta.permissions().readonly();
+                                    let readonly = (set_mode & 0o200) == 0;
+                                    if let Err(e) = std::fs::set_permissions(&path, {
+                                        let mut perms = meta.permissions();
+                                        perms.set_readonly(readonly);
+                                        perms
+                                    }) {
+                                        report_error(&format!("chmod (win) error: {}", e));
+                                    } else if !ctx.reverse_mode {
+                                        ctx.reverse_ops.push(ReverseOp::Chmod { path: path.clone(), mode: if prev_readonly { 1 } else { 0 } });
                                     }
                                 }
                             }
