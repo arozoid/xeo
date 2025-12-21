@@ -106,4 +106,8 @@ jobs:
         with:
           files: ./dist/*
           generate_release_notes: true
+<<<<<<< HEAD
           draft: true
+=======
+          draft: true
+>>>>>>> 275db7825ea352a7741d182ac5f1341ee02636a4
