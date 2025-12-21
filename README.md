@@ -63,6 +63,13 @@ with the `use` and `func` commands, scripts can be broken down into reusable mod
 
 ## quick start
 1. run `curl -fsSL https://github.com/arozoid/xeo/releases/latest/download/install.sh | bash` in your terminal.
-2. that's it! enjoy using .xeo! 
+2. run xeo in your terminal. if it works, congrats. if it doesn't, and you're on macos, please run these two commands in your terminal:
+```
+# Remove the download restriction
+xattr -d com.apple.quarantine ./xeo-macos
+
+# Locally sign the binary so the kernel allows it to run
+codesign -s - ./xeo-macos --force
+```
 
 > **note:** .xeo is installed locally (~/.xeon/ directory). if you want to use .xeo on another user, please run the install script again.
