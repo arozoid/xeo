@@ -14,7 +14,7 @@ for **xeon** built on rust, featuring 28 core commands:
 - `string <expr> as $var`: concatenates strings or returns string as a variable.
 - `find $haystack <needle> $bool`: looks for string in specified variable, and returns a boolean as a variable.
 - `fetch <url> $var`: sets a variable to url content.
-- `args <arg1> <arg2> <arg3> ...`: grabs any number of arguments from initial command execution
+- `args $arg1 $arg2 $arg3 ...`: grabs any number of arguments from initial command execution
 
 ### flow control
 - `dir <path>`: changes execution path.
