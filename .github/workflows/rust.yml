@@ -59,6 +59,7 @@ jobs:
 
     - name: Set paths
       id: paths
+      shell: bash
       run: |
         case "${{ matrix.os }}" in
           macos-latest)
