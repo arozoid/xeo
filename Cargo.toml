@@ -1,0 +1,19 @@
+[package]
+name = "xeo2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+colored = "2.1.0"
+evalexpr = "8.1"
+minreq = { version = "2.11", features = ["https-rustls"] }
+
+[profile.release]
+opt-level = "z"     # Optimize for size ('s' or 'z')
+debug = false
+lto = "fat"          # Enable Link Time Optimization (fat LTO for best size)
+codegen-units = 1   # Reduce parallel code generation for better optimization
+panic = "abort"     # Remove stack unwinding code (saves ~10% size)
+overflow-checks = false
+incremental = false
+strip = true        # Automatically strip symbols (same as running `strip` command)
