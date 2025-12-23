@@ -1,15 +1,17 @@
 func greet $person
-    print "hello $person!"
+    if $person == "developer"
+        print "hello developer!"
+    else
+        set $$developer "you brozo.."
+        return
+    end
+    set $$person "brozo"
 end
 
-if 1 < 2
-    print "1 is less than 2!!"
-else
-    print "something is horribly wrong"
-end
-
-call greet "world"
 call greet "developer"
-repeat 3 as $n
-    call greet $n
+print "$developer"
+set $e 1 + 2
+
+repeat $e as $n
+    print "test"
 end
