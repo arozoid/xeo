@@ -123,9 +123,18 @@ fn is_at_function_bottom(current_pc: usize, program: &[Instruction]) -> bool {
 
 fn resolve_vars(text: &str, ctx: &Context) -> String {
     let mut result = text.to_string();
-    for (name, value) in &ctx.variables {
-        // Ensure we match both "name" and "$name" depending on how you store them
-        let placeholder = format!("${}", name.trim_start_matches('$'));
+    
+    // Sort keys by length descending so $element is replaced before $e
+    let mut keys: Vec<_> = ctx.variables.keys().collect();
+    keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+
+    for name in keys {
+        let value = &ctx.variables[name];
+        
+        // Ensure we are looking for the $ prefix version in the text
+        let clean_name = name.trim_start_matches('$');
+        let placeholder = format!("${}", clean_name);
+        
         if result.contains(&placeholder) {
             result = result.replace(&placeholder, value);
         }
@@ -443,50 +452,49 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
             //================//
             "set" => {
                 let arg0 = &instr.args[0];
-                let mut var_name = String::new();
-
-                if arg0.starts_with("$$") {
-                    let pointer_name = &arg0[2..]; // "person"
-                    // Check for "person" OR "$person" in the map
-                    var_name = ctx.variables.get(pointer_name)
+                
+                let var_name = if arg0.starts_with("$$") {
+                    let pointer_name = &arg0[2..];
+                    ctx.variables.get(pointer_name)
                         .or_else(|| ctx.variables.get(&format!("${}", pointer_name)))
                         .cloned()
-                        .unwrap_or_else(|| pointer_name.to_string());
-                }
-                // ---------------------------------
+                        .unwrap_or_else(|| pointer_name.to_string())
+                } else {
+                    arg0.trim_start_matches('$').to_string()
+                };
 
-                // Everything after the variable name is part of the expression
+                // Safety check: Ensure we don't insert an empty string as a key
+                let final_key = var_name.trim_start_matches('$').to_string();
+                if final_key.is_empty() {
+                    return; // Or report an error
+                }
+
                 let expression_parts = &instr.args[1..];
-                
-                // 1. Resolve all parts first (convert $vars to their values)
                 let resolved_parts: Vec<String> = expression_parts.iter()
                     .map(|p| resolve_vars(p, ctx))
                     .collect();
 
-                // 2. Determine if it's Math or String Concatenation
                 let full_expr = resolved_parts.join(" ");
-                
                 let is_math = !full_expr.contains('"') && 
-                            full_expr.chars().any(|c| "+-*/%()".contains(c));
+                            full_expr.chars().any(|c| "+-*/%() ".contains(c));
 
                 if is_math {
                     match evalexpr::eval(&full_expr) {
                         Ok(value) => {
-                            ctx.variables.insert(var_name, value.to_string());
+                            ctx.variables.insert(final_key, value.to_string());
                         }
                         Err(_) => {
-                            ctx.variables.insert(var_name, full_expr);
+                            ctx.variables.insert(final_key, full_expr);
                         }
                     }
                 } else {
-                    // 3. String Concatenation (Simply join without the "+" signs)
                     let mut final_str = String::new();
                     for part in resolved_parts {
                         if part != "+" {
                             final_str.push_str(&part.replace('"', ""));
                         }
                     }
-                    ctx.variables.insert(var_name, final_str);
+                    ctx.variables.insert(final_key, final_str);
                 }
             }
             "break" => {
@@ -568,14 +576,10 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                 }
 
                 // 3. Execution Logic
-                // Resolve the first argument (e.g., "$e" becomes "3")
-                let count_str = resolve_vars(instr.args.get(0).expect("Repeat needs a count"), ctx);
-                println!("{}", count_str);
+                let raw_count = instr.args.get(0).expect("Repeat requires a count");
+                let resolved_count = resolve_vars(raw_count, ctx);
+                let count: usize = resolved_count.trim().parse().unwrap_or(1);
 
-                // Parse the resolved string into a number
-                // We use .trim() to ensure no hidden spaces like " 3" break the parser
-                let count: usize = count_str.trim().parse::<usize>().unwrap_or(1);
-                println!("{}", count);
                 let var_name = instr.args.get(2).map(|s| s.replace("$", ""));
                 let loop_key = format!("loop_{}", ctx.pc);
 

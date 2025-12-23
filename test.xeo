@@ -10,8 +10,8 @@ end
 
 call greet "developer"
 print "$developer"
-set $e 1 + 2
-
-repeat $e as $n
+set $epic 1 + 4
+print $epic
+repeat $epic as $n
     print "test"
 end
