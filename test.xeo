@@ -2,16 +2,17 @@ func greet $person
     if $person == "developer"
         print "hello developer!"
     else
-        set $$developer "you brozo.."
+        set $$person "you brozo.."
         return
     end
     set $$person "brozo"
 end
 
 call greet "developer"
+print "$person"
 print "$developer"
+wait 300
 set $epic 1 + 4
-print $epic
 repeat $epic as $n
     print "test"
 end

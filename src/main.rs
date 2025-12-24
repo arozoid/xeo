@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::collections::HashMap;
+use std::io;
 use evalexpr::{HashMapContext, Value, eval_with_context, ContextWithMutableVariables};
 
 fn main() {
@@ -9,8 +10,12 @@ fn main() {
     
     // 1. Detect and remove flags
     let verbose = args.iter().any(|arg| arg == "-v" || arg == "--verbose");
+    let ultra_verbose = args.iter().any(|arg| arg == "-vv" || arg == "--trace" || arg == "--debug");
     let reverse = args.iter().any(|arg| arg == "-r" || arg == "--reverse");
     let version = args.iter().any(|arg| arg == "-V" || arg == "--version");
+
+    let verbose = verbose || ultra_verbose;
+    println!("{}", ultra_verbose);
     
     // Remove flags from the vector so they don't interfere with path/script args
     args.retain(|arg| !arg.starts_with('-'));
@@ -23,11 +28,11 @@ fn main() {
     }
     if args.len() < 2 {
         // Pass flags into your mode handler
-        mode("interactive", &args, verbose, reverse);
+        mode("interactive", &args, verbose, reverse, ultra_verbose);
         return;
     }
     
-    mode("script", &args, verbose, reverse);
+    mode("script", &args, verbose, reverse, ultra_verbose);
 }
 
 //================================//
@@ -52,6 +57,7 @@ pub struct Context {
     pub pc: usize,
     
     pub script_path: String,
+    pub ultra_verbose: bool,
     pub verbose: bool,
     pub reverse: bool,
 }
@@ -164,7 +170,6 @@ fn evaluate(args: &[String], ctx: &Context) -> Value {
     }
     
     let expr = expr_parts.join(" ");
-    println!("Evaluating expression: {}", expr); // Now: person == "developer"
     
     let mut eval_ctx = HashMapContext::new();
     for (name, val) in &ctx.variables {
@@ -209,7 +214,7 @@ fn read_xeo(path: &PathBuf, ctx: &mut Context) -> Vec<Instruction> {
     }
 }
 
-fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool) {
+fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verbose: bool) {
     // Create one context that lives as long as the mode
     let path_str = args.get(1).cloned().unwrap_or_else(|| String::from("interactive"));
     let mut ctx = Context {
@@ -223,6 +228,7 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool) {
         script_path: path_str.clone(),
 
         pc: 0,
+        ultra_verbose,
         verbose,
         reverse,
     };
@@ -317,7 +323,7 @@ fn lex(content: &str) -> Vec<Token> {
 fn parse_tokens(tokens: Vec<Token>) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut i = 0;
-    let commands = ["print", "set", "continue", "return", "break", "if", "else", "end", "repeat", "func", "call", "wget", "fetch"];
+    let commands = ["print", "set", "continue", "return", "break", "if", "else", "end", "repeat", "func", "call", "wget", "fetch", "wait", "exit"];
 
     while i < tokens.len() {
         if commands.contains(&tokens[i].val.as_str()) {
@@ -352,8 +358,7 @@ fn parse(content: &str, ctx: &mut Context) -> Vec<Instruction> {
     parse_tokens(lex(content))
         .into_iter()
         .enumerate()
-        .for_each(|(idx, mut instr)| {
-            instr.line_num = idx + 1; // Simple line number assignment
+        .for_each(|(_idx, mut instr)| {
             program.push(instr);
         });
 
@@ -390,7 +395,7 @@ fn parse(content: &str, ctx: &mut Context) -> Vec<Instruction> {
     
     // Check if any repeats were left unclosed
     for open_loop in stack {
-        println!("Error: 'repeat' on line {} never ended", program[open_loop].line_num);
+        ctx.report_error("'repeat' on line {} never ended", program[open_loop].line_num);
     }
 
     program
@@ -414,10 +419,24 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
             }
         }
 
+        if ctx.ultra_verbose {
+            verbose_log(ctx, format!("{} {DIM}({}:{}){ESC}", instr.name, ctx.script_path, instr.line_num).as_str());
+        }
         match instr.name.as_str() {
             "print" => {
                 let output = resolve_vars(clean_multiline(&instr.args.join(" ")).as_str(), ctx);
                 println!("{}", output);
+            }
+            "ask" => {
+                let mut input = String::new();
+                match io::stdin().read_line(&mut input) {
+                    Ok(_n) => {
+                        ctx.variables.insert(instr.args.get(0).expect("$cool").trim_start_matches("$").to_string(), input);
+                    }
+                    Err(e) => {
+                        ctx.report_error(format!("{}", e).as_str(), instr.line_num);
+                    }
+                }
             }
             "fetch" => {
                 let url = resolve_vars(&instr.args[0], ctx);
@@ -450,6 +469,9 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
             //================//
             //---core stuff---//
             //================//
+            "wait" => {
+                std::thread::sleep(std::time::Duration::from_millis(instr.args.get(0).expect("invalid sleep time").parse::<u64>().unwrap()));
+            }
             "set" => {
                 let arg0 = &instr.args[0];
                 
@@ -643,6 +665,7 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                 // 3. If it's an 'if' end, just fall through (pc += 1) 
                 // This lets us reach: set $$person "brozo"
             }
+            "exit" => std::process::exit(0),
             _ => {
                 println!("Unknown command: {}", instr.name);
             }
