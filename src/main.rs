@@ -416,8 +416,6 @@ fn parse_tokens(tokens: Vec<Token>, ctx: &Context) -> Vec<Instruction> {
                 line_num,
             });
         } else {
-            // If it's NOT a command, skip it. This prevents "you brozo.." 
-            // from being turned into an instruction if it's orphaned.
             i += 1;
         }
     }
@@ -627,6 +625,38 @@ fn execute(ctx: &mut Context) {
             //================//
             //---core stuff---//
             //================//
+            "ext" => {
+                let cmd_name = resolve_vars(&instr.args[0], ctx);
+                let args: Vec<String> = instr.args[1..].iter()
+                    .map(|arg| resolve_vars(arg, ctx))
+                    .collect();
+
+                let mut child = std::process::Command::new(cmd_name)
+                    .args(args)
+                    .spawn()
+                    .expect("failed to execute process");
+
+                // Wait for it to finish so the script doesn't outrun the build
+                child.wait().ok();
+            }
+            "extc" => {
+                let cmd_name = resolve_vars(&instr.args[0], ctx);
+                let args: Vec<String> = instr.args[1..].iter()
+                    .map(|arg| resolve_vars(arg, ctx))
+                    .collect();
+
+                let output = std::process::Command::new(cmd_name)
+                    .args(args)
+                    .output(); // .output() captures stdout and stderr automatically
+
+                match output {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        ctx.variables.insert("res".to_string(), stdout);
+                    }
+                    Err(e) => ctx.report_error(&format!("extc failed: {}", e), instr.line_num),
+                }
+            }
             "use" => {
                 let mut filename = resolve_vars(&instr.args[0], ctx);
                 if !filename.ends_with(".xeo") {
