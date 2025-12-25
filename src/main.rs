@@ -239,10 +239,15 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verb
             println!("{BLUE}xeo v4.0.0 (interactive){ESC}");
 
             use rustyline::error::ReadlineError;
-            use rustyline::DefaultEditor;
+            use rustyline::{Cmd, DefaultEditor, Modifiers, KeyCode, KeyEvent};
 
             let mut rl = DefaultEditor::new().unwrap();
             let mut accumulator = String::new();
+
+            rl.bind_sequence(
+                KeyEvent(KeyCode::Tab, Modifiers::NONE), 
+                Cmd::Insert(1, "  ".to_string()) // Inserts exactly 4 spaces
+            );
 
             loop {
                 // Change prompt if we are inside a block
@@ -804,7 +809,7 @@ fn execute(ctx: &mut Context) {
                     let name = &instr.name;
                     if let Some(&target_pc) = ctx.functions.get(name) {
                         let mut vals = Vec::new();
-                        for arg in instr.args.iter().skip(1) {
+                        for arg in instr.args.iter().skip(0) {
                             vals.push(resolve_vars(arg, ctx));
                         }
                         ctx.arg_stack.push(vals);
