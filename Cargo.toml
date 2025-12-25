@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 evalexpr = "8.1"
 minreq = { version = "2.11", features = ["https-rustls"] }
+rustyline = "14.0"
+ctrlc = "3.4"
 
 [profile.release]
 opt-level = "z"     # Optimize for size ('s' or 'z')

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use evalexpr::{HashMapContext, Value, eval_with_context, ContextWithMutableVariables};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
@@ -54,6 +55,7 @@ pub struct Context {
     pub return_stack: Vec<usize>,
     pub loop_stack: Vec<usize>,
     pub arg_stack: Vec<Vec<String>>,
+    pub program: Vec<Instruction>,
     pub pc: usize,
     
     pub script_path: String,
@@ -83,10 +85,11 @@ pub enum Signal {
 }
 
 const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
 const BLUE: &str = "\x1b[34m";
 const DIM: &str = "\x1b[2m";
 const ESC: &str = "\x1b[0m";
+
+static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
 
 //================================//
 //------- helper functions -------//
@@ -162,6 +165,32 @@ fn clean_multiline(input: &str) -> String {
         .to_string()
 }
 
+fn is_block_complete(input: &str) -> bool {
+    let mut depth = 0;
+    let mut in_quotes = false;
+    
+    // Simple character scan for quotes and block keywords
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' && (i == 0 || chars[i-1] != '\\') {
+            in_quotes = !in_quotes;
+        }
+        
+        if !in_quotes {
+            // Check for block starts (must be surrounded by boundaries or start of string)
+            let remaining = &input[i..];
+            if remaining.starts_with("func") || remaining.starts_with("if") || remaining.starts_with("repeat") {
+                depth += 1;
+            } else if remaining.starts_with("end") {
+                depth -= 1;
+            }
+        }
+        i += 1;
+    }
+    depth <= 0
+}
+
 //================================//
 //------ handler functions -------//
 //================================//
@@ -189,6 +218,7 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verb
         return_stack: Vec::new(),
         loop_stack: Vec::new(),
         arg_stack: Vec::new(),
+        program: Vec::new(),
         script_path: path_str.clone(),
 
         pc: 0,
@@ -200,33 +230,70 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verb
 
     match mode {
         "interactive" => {
+            ctrlc::set_handler(move || {
+                SHOULD_STOP.store(true, Ordering::SeqCst);
+                println!("\n{DIM}interrupted (use 'exit' to exit interpreter){ESC}");
+            }).ok();
+
+            println!("{DIM}arrow keys for history, enter for execute/new line.{ESC}");
             println!("{BLUE}xeo v4.0.0 (interactive){ESC}");
+
+            use rustyline::error::ReadlineError;
+            use rustyline::DefaultEditor;
+
+            let mut rl = DefaultEditor::new().unwrap();
+            let mut accumulator = String::new();
+
             loop {
-                use std::io::{self, Write};
-                print!("{BLUE}>> {ESC}");
-                io::stdout().flush().unwrap();
-
-                let mut input = String::new();
-                io::stdin().read_line(&mut input).unwrap();
+                // Change prompt if we are inside a block
+                let prompt = if accumulator.is_empty() { "\x1b[34m>>\x1b[0m " } else { "\x1b[34m..\x1b[0m " };
                 
-                if input.trim() == "exit" { break; }
+                let readline = rl.readline(prompt);
+                match readline {
+                    Ok(line) => {
+                        if line.trim() == "exit" { break; }
+                        
+                        // Add to history so Up/Down arrows work
+                        let _ = rl.add_history_entry(line.as_str());
+                        
+                        accumulator.push_str(&line);
+                        accumulator.push('\n');
 
-                // 1. Parse the input into instructions
-                let program = parse(&input, &mut ctx);
-                
-                // 2. Reset PC for this specific snippet and run
-                ctx.pc = 0; 
-                execute(program, &mut ctx);
+                        if is_block_complete(&accumulator) {
+                            let new_instrs = parse(&accumulator, &mut ctx);
+                            
+                            // Add to permanent memory
+                            ctx.program.extend(new_instrs);
+                            
+                            // Execute
+                            execute(&mut ctx);
+                            
+                            accumulator.clear();
+                        }
+                    }
+                    Err(ReadlineError::Interrupted) => { // Ctrl-C
+                        println!("{DIM}interrupted (use 'exit' to exit interpreter){ESC}");
+                        accumulator.clear();
+                    }
+                    Err(ReadlineError::Eof) => { // Ctrl-D
+                        break;
+                    }
+                    Err(err) => {
+                        println!("{RED}[xeo] err:{ESC} {:?}", err);
+                        break;
+                    }
+                }
             }
         }
         "script" => {
             // 1. Load and Parse the whole file
             let program = read_xeo(&script_path, &mut ctx);
+            ctx.program = program;
             
             // 2. Run the whole program
             ctx.pc = 0;
-            execute(program, &mut ctx);
-        }
+            execute(&mut ctx);
+        },
         _ => println!("Unknown mode: {}", mode),
     }
 }
@@ -369,7 +436,7 @@ fn parse(content: &str, ctx: &mut Context) -> Vec<Instruction> {
     parse_tokens(tokens, ctx)
         .into_iter()
         .enumerate()
-        .for_each(|(_idx, mut instr)| {
+        .for_each(|(_idx, instr)| {
             program.push(instr);
         });
 
@@ -415,9 +482,14 @@ fn parse(content: &str, ctx: &mut Context) -> Vec<Instruction> {
 //================================//
 //--------- interpreter ----------//
 //================================//
-fn execute(program: Vec<Instruction>, ctx: &mut Context) {
-    while ctx.pc < program.len() {
-        let instr = &program[ctx.pc];
+fn execute(ctx: &mut Context) {
+    while ctx.pc < ctx.program.len() {
+        let instr = &ctx.program[ctx.pc];
+
+        if SHOULD_STOP.load(Ordering::SeqCst) {
+            SHOULD_STOP.store(false, Ordering::SeqCst); // Reset for next time
+            break; // Exit the loop and return to REPL
+        }
 
         // --- SIGNAL HANDLING ---
         if ctx.signal == Signal::Return {
@@ -433,6 +505,7 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
         if ctx.ultra_verbose {
             verbose_log(ctx, format!("{} {DIM}({}:{}){ESC}", instr.name, ctx.script_path, instr.line_num).as_str());
         }
+
         match instr.name.as_str() {
             "print" => {
                 let output = resolve_vars(clean_multiline(&instr.args.join(" ")).as_str(), ctx);
@@ -470,31 +543,69 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                 }
             }
             "wget" => {
+                let url = resolve_vars(&instr.args[0], ctx);
                 let path = resolve_vars(&instr.args[1], ctx);
 
-                if ctx.reverse {
-                    // UNDO: Delete the file
-                    verbose_log(ctx, &format!("rollback: deleting {}", path));
-                    if std::path::Path::new(&path).exists() {
-                        if let Err(e) = std::fs::remove_file(&path) {
-                            ctx.report_error(&format!("failed to delete {}: {}", path, e), instr.line_num);
+                verbose_log(ctx, &format!("downloading {}...", url));
+
+                match minreq::get(&url).send_lazy() {
+                    Ok(res) => {
+                        let mut file = std::fs::File::create(&path).ok();
+                        let mut buffer = Vec::with_capacity(8192); // 8KB buffer
+
+                        for byte_result in res {
+                            // 1. CHECK INTERRUPT (Check every byte is fine, it's just a flag check)
+                            if SHOULD_STOP.load(Ordering::SeqCst) {
+                                println!("\x1b[33m\n[xeo] Aborted. Cleaning up...\x1b[0m");
+                                drop(file); 
+                                let _ = std::fs::remove_file(&path);
+                                return; 
+                            }
+
+                            if let Ok((byte, _)) = byte_result {
+                                buffer.push(byte);
+                                
+                                // 2. Only write to disk when the buffer is full
+                                if buffer.len() >= 8192 {
+                                    if let Some(ref mut f) = file {
+                                        use std::io::Write;
+                                        let _ = f.write_all(&buffer);
+                                    }
+                                    buffer.clear();
+                                }
+                            }
+                        }
+                        // 3. Write anything left in the buffer at the end
+                        if !buffer.is_empty() {
+                            if let Some(ref mut f) = file {
+                                use std::io::Write;
+                                let _ = f.write_all(&buffer).ok();
+                            }
                         }
                     }
-                } else {
-                    // DO: Download the file
-                    let url = resolve_vars(&instr.args[0], ctx);
-                    verbose_log(ctx, &format!("downloading {} to {}", url, path));
-                    match minreq::get(&url).send() {
-                        Ok(res) => { std::fs::write(&path, res.as_bytes()).ok(); }
-                        Err(e) => ctx.report_error(&format!("wget failed: {}", e), instr.line_num),
-                    }
+                    Err(e) => ctx.report_error(&format!("wget failed: {}", e), instr.line_num),
                 }
             }
             //================//
             //---core stuff---//
             //================//
             "wait" => {
-                std::thread::sleep(std::time::Duration::from_millis(instr.args.get(0).expect("invalid sleep time").parse::<u64>().unwrap()));
+                let ms_str = instr.args.get(0).map(|s| s.as_str()).unwrap_or("0");
+                if let Ok(mut remaining_ms) = ms_str.parse::<u64>() {
+                    // Break the wait into 100ms chunks
+                    while remaining_ms > 0 {
+                        // 1. Check if we should stop immediately
+                        if SHOULD_STOP.load(Ordering::SeqCst) {
+                            break; 
+                        }
+
+                        // 2. Decide how long to sleep this chunk (max 100ms)
+                        let sleep_chunk = if remaining_ms > 100 { 100 } else { remaining_ms };
+                        std::thread::sleep(std::time::Duration::from_millis(sleep_chunk));
+                        
+                        remaining_ms -= sleep_chunk;
+                    }
+                }
             }
             "set" => {
                 let arg0 = &instr.args[0];
