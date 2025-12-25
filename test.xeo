@@ -8,11 +8,19 @@ func greet $person
     set $$person "brozo"
 end
 
-ask $sigma "who are you brozo? "
-call greet $sigma
-print $$sigma
+func yess
+    print "brozo, we made it!!!"
+end
+
+ask $epic "who are you brozo? "
+call greet $epic
+print $$epic
+print "
+is this thing working?
+idk
+"
 wait 300
-set $epic 1 + 4
-repeat $epic as $n
+set $epic2 1 + 4
+repeat $epic2 as $n
     print "test"
 end

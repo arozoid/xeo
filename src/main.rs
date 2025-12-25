@@ -15,7 +15,6 @@ fn main() {
     let version = args.iter().any(|arg| arg == "-V" || arg == "--version");
 
     let verbose = verbose || ultra_verbose;
-    println!("{}", ultra_verbose);
     
     // Remove flags from the vector so they don't interfere with path/script args
     args.retain(|arg| !arg.starts_with('-'));
@@ -240,16 +239,10 @@ fn lex(content: &str) -> Vec<Token> {
     let mut current = String::new();
     let mut in_quotes = false;
     let mut line_count = 1;
-    let mut token_start_line = 1;
+    let mut token_start_line = 1; // Track where a multi-line token began
     let mut chars = content.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if c == '\n' { line_count += 1; }
-
-        if current.is_empty() && !c.is_whitespace() {
-            token_start_line = line_count;
-        }
-
         match c {
             '\\' => {
                 if let Some(next_c) = chars.next() {
@@ -266,38 +259,77 @@ fn lex(content: &str) -> Vec<Token> {
                     chars.next();
                 }
             }
-            '"' => { 
-                if !in_quotes { token_start_line = line_count; }
-                in_quotes = !in_quotes; 
+            '"' => {
+                if !in_quotes {
+                    // This is the start of a string: record the line number
+                    token_start_line = line_count;
+                }
+                in_quotes = !in_quotes;
+                // Quote removed from token (as requested)
+            }
+            '\n' => {
+                if in_quotes {
+                    // Inside quotes: the newline is part of the string data
+                    current.push('\n');
+                } else {
+                    // Outside quotes: the newline acts as a delimiter
+                    if !current.is_empty() {
+                        tokens.push(Token { val: current.clone(), line: token_start_line });
+                        current.clear();
+                    }
+                }
+                line_count += 1;
+                // If we aren't mid-token, the next token starts here
+                if current.is_empty() {
+                    token_start_line = line_count;
+                }
             }
             c if c.is_whitespace() && !in_quotes => {
                 if !current.is_empty() {
-                    tokens.push(Token { val: current.clone(), line: line_count });
+                    tokens.push(Token { val: current.clone(), line: token_start_line });
                     current.clear();
                 }
+                // Update start line for the next token to the current line
+                token_start_line = line_count;
             }
-            _ => current.push(c),
+            _ => {
+                if current.is_empty() && !in_quotes {
+                    token_start_line = line_count;
+                }
+                current.push(c);
+            }
         }
     }
+    
     if !current.is_empty() {
         tokens.push(Token { val: current, line: token_start_line });
     }
     tokens
 }
 
-fn parse_tokens(tokens: Vec<Token>) -> Vec<Instruction> {
+fn parse_tokens(tokens: Vec<Token>, ctx: &Context) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut i = 0;
-    let commands = ["print", "set", "continue", "return", "break", "if", "else", "end", "repeat", "func", "call", "wget", "fetch", "wait", "exit", "ask"];
+    
+    // Hardcoded language keywords
+    let base_commands = [
+        "print", "set", "if", "else", "end", "repeat", "func", 
+        "call", "ask", "coreadd", "wait", "exit", "fetch", 
+        "wget", "return", "break", "continue"
+    ];
 
     while i < tokens.len() {
-        if commands.contains(&tokens[i].val.as_str()) {
-            let name = tokens[i].val.clone();
-            let line_num = tokens[i].line; // Capture the actual line!
-            i += 1;
+        let name = tokens[i].val.clone();
+        let line_num = tokens[i].line;
 
+        // Check if the token is a known command OR a coreadd function
+        let is_command = base_commands.contains(&name.as_str()) || ctx.corefuncs.contains(&name);
+
+        if is_command {
+            i += 1;
             let mut args = Vec::new();
-            while i < tokens.len() && !commands.contains(&tokens[i].val.as_str()) {
+            // Greedy: take everything else on this line as an argument
+            while i < tokens.len() && tokens[i].line == line_num {
                 args.push(tokens[i].val.clone());
                 i += 1;
             }
@@ -309,6 +341,8 @@ fn parse_tokens(tokens: Vec<Token>) -> Vec<Instruction> {
                 line_num,
             });
         } else {
+            // If it's NOT a command, skip it. This prevents "you brozo.." 
+            // from being turned into an instruction if it's orphaned.
             i += 1;
         }
     }
@@ -318,9 +352,21 @@ fn parse_tokens(tokens: Vec<Token>) -> Vec<Instruction> {
 fn parse(content: &str, ctx: &mut Context) -> Vec<Instruction> {
     let mut program = Vec::new();
     let mut stack = Vec::new(); // This tracks the "unclosed" repeats
+    let tokens = lex(content);
+
+    // PRE-PASS SCANNER: Find coreadd functions
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].val == "coreadd" {
+            if let Some(name_token) = tokens.get(i + 1) {
+                ctx.corefuncs.push(name_token.val.clone());
+            }
+        }
+        i += 1;
+    }
 
     // PASS 1: Create the instructions
-    parse_tokens(lex(content))
+    parse_tokens(tokens, ctx)
         .into_iter()
         .enumerate()
         .for_each(|(_idx, mut instr)| {
@@ -447,16 +493,6 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
             //================//
             //---core stuff---//
             //================//
-            "coreadd" => {
-                let func_name = instr.args.get(0).expect("error finding args");
-                if func_name == "" {
-                    ctx.report_error("coreadd requires a command", instr.line_num);
-                } else if func_name == "error finding args" {
-                    ctx.report_error("was unable to parse coreadd args", instr.line_num);
-                } else {
-                    ctx.corefuncs.push(func_name.to_string());
-                }
-            }
             "wait" => {
                 std::thread::sleep(std::time::Duration::from_millis(instr.args.get(0).expect("invalid sleep time").parse::<u64>().unwrap()));
             }
@@ -668,7 +704,7 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                         ctx.pc = target_pc;
                         continue; // Jump immediately to the 'func' line
                     }
-                } else {
+                } else if &instr.name == "coreadd" {} else {
                     ctx.report_error(format!("unknown command: {}", instr.name).as_str(), instr.line_num);
                 }
             }
