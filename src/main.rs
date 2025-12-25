@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -59,6 +60,7 @@ pub struct Context {
     pub pc: usize,
     
     pub script_path: String,
+    pub loaded_modules: HashSet<String>,
     pub ultra_verbose: bool,
     pub verbose: bool,
     pub reverse: bool,
@@ -222,6 +224,7 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verb
         script_path: path_str.clone(),
 
         pc: 0,
+        loaded_modules: HashSet::new(),
         ultra_verbose,
         verbose,
         reverse,
@@ -386,8 +389,8 @@ fn parse_tokens(tokens: Vec<Token>, ctx: &Context) -> Vec<Instruction> {
     // Hardcoded language keywords
     let base_commands = [
         "print", "set", "if", "else", "end", "repeat", "func", 
-        "call", "ask", "coreadd", "wait", "exit", "fetch", 
-        "wget", "return", "break", "continue"
+        "run", "ask", "coreadd", "wait", "exit", "fetch", 
+        "wget", "return", "break", "continue", "use"
     ];
 
     while i < tokens.len() {
@@ -542,9 +545,39 @@ fn execute(ctx: &mut Context) {
             }
             "fetch" => {
                 let url = resolve_vars(&instr.args[0], ctx);
-                if let Ok(response) = minreq::get(url).send() {
-                    let body = response.as_str().unwrap_or("");
-                    ctx.variables.insert("res".to_string(), body.to_string());
+                verbose_log(ctx, &format!("fetching {}...", url));
+
+                // 1. Use send_lazy to stream the response
+                match minreq::get(&url).with_max_redirects(5).send_lazy() {
+                    Ok(res) => {
+                        let mut body_accumulator = Vec::new(); // Use a Vec to collect bytes
+                        let mut chunk_buffer = Vec::with_capacity(8192); // 8KB check-point
+
+                        for byte_result in res {
+                            // 2. CHECK INTERRUPT (Every byte or every chunk)
+                            if SHOULD_STOP.load(Ordering::SeqCst) {
+                                println!("{BLUE}[xeo] fetch:{ESC} aborted by user");
+                                return; 
+                            }
+
+                            if let Ok((byte, _)) = byte_result {
+                                chunk_buffer.push(byte);
+                                
+                                // 3. Move from chunk buffer to main body
+                                if chunk_buffer.len() >= 8192 {
+                                    body_accumulator.append(&mut chunk_buffer);
+                                }
+                            }
+                        }
+                        
+                        // 4. Finalize the remaining bytes
+                        body_accumulator.append(&mut chunk_buffer);
+
+                        // 5. Convert to String and store in 'res' variable
+                        let final_body = String::from_utf8_lossy(&body_accumulator).to_string();
+                        ctx.variables.insert("res".to_string(), final_body);
+                    }
+                    Err(e) => ctx.report_error(&format!("fetch failed: {}", e), instr.line_num),
                 }
             }
             "wget" => {
@@ -594,6 +627,42 @@ fn execute(ctx: &mut Context) {
             //================//
             //---core stuff---//
             //================//
+            "use" => {
+                let mut filename = resolve_vars(&instr.args[0], ctx);
+                if !filename.ends_with(".xeo") {
+                    let with_ext = format!("{}.xeo", filename);
+                    // Only switch if the .xeo version actually exists on disk
+                    if std::path::Path::new(&with_ext).exists() {
+                        filename = with_ext;
+                    }
+                }
+                if ctx.loaded_modules.contains(&filename) {
+                    return; // Already loaded, skip to avoid infinite loops
+                }
+                ctx.loaded_modules.insert(filename.clone());
+                
+                match std::fs::read_to_string(&filename) {
+                    Ok(content) => {
+                        // 1. Parse the external file into a separate list
+                        let sub_program = parse(&content, ctx);
+                        
+                        // 2. Save the current state
+                        let old_pc = ctx.pc;
+                        let old_program = std::mem::replace(&mut ctx.program, sub_program);
+                        
+                        // 3. Reset PC to start of the NEW file
+                        ctx.pc = 0;
+                        
+                        // 4. Execute the sub-program using the same Context
+                        execute(ctx);
+                        
+                        // 5. Restore the original program and PC
+                        ctx.program = old_program;
+                        ctx.pc = old_pc; 
+                    }
+                    Err(e) => ctx.report_error(&format!("use failed: {}", e), instr.line_num),
+                }
+            }
             "wait" => {
                 let ms_str = instr.args.get(0).map(|s| s.as_str()).unwrap_or("0");
                 if let Ok(mut remaining_ms) = ms_str.parse::<u64>() {
@@ -698,7 +767,7 @@ fn execute(ctx: &mut Context) {
                     }
                 }
             }
-            "call" => {
+            "run" => {
                 let name = &instr.args[0];
                 if let Some(&target_pc) = ctx.functions.get(name) {
                     let mut vals = Vec::new();

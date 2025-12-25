@@ -13,7 +13,7 @@ func yess
 end
 
 ask $epic "who are you brozo? "
-call greet $epic
+run greet $epic
 print $$epic
 print "
 is this thing working?
@@ -21,6 +21,6 @@ idk
 "
 wait 300
 set $epic2 1 + 4
-repeat $epic2 as $n
+repeat 3 as $n
     print "test"
 end
