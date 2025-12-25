@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use evalexpr::{HashMapContext, Value, eval_with_context, ContextWithMutableVariables};
 
 fn main() {
@@ -50,6 +50,7 @@ pub struct Context {
     pub variables: std::collections::HashMap<String, String>,
     pub functions: HashMap<String, usize>,
     pub signal: Signal,
+    pub corefuncs: Vec<String>,
 
     pub return_stack: Vec<usize>,
     pub loop_stack: Vec<usize>,
@@ -91,42 +92,6 @@ const ESC: &str = "\x1b[0m";
 //================================//
 //------- helper functions -------//
 //================================//
-fn is_at_function_bottom(current_pc: usize, program: &[Instruction]) -> bool {
-    // 1. Literal end of the program
-    if current_pc + 1 >= program.len() {
-        return true;
-    }
-
-    // 2. The next instruction is a new function definition
-    if program[current_pc + 1].name == "func" {
-        return true;
-    }
-
-    // 3. To prevent skipping 'set' commands inside a function:
-    // Only return true if this 'end' is NOT followed by instructions 
-    // that belong to the same function.
-    
-    // In your specific case, PC 6 is an 'if-end'. PC 8 is the 'func-end'.
-    // We need to ensure PC 6 returns FALSE.
-    
-    let current_instr = &program[current_pc];
-    
-    // If this end has no jump_to (meaning it's not a repeat loop)
-    if current_instr.name == "end" && current_instr.jump_to.is_none() {
-        // Look ahead: if the next thing is a 'func' or the end of the array, 
-        // it's the function bottom.
-        let next_name = &program[current_pc + 1].name;
-        
-        // If the next instruction is one of these, and it's NOT inside a function 
-        // definition, it's global. This is the tricky part!
-        if next_name == "call" {
-            return true;
-        }
-    }
-
-    false
-}
-
 fn resolve_vars(text: &str, ctx: &Context) -> String {
     let mut result = text.to_string();
     
@@ -137,7 +102,6 @@ fn resolve_vars(text: &str, ctx: &Context) -> String {
     for name in keys {
         let value = &ctx.variables[name];
         
-        // Ensure we are looking for the $ prefix version in the text
         let clean_name = name.trim_start_matches('$');
         let placeholder = format!("${}", clean_name);
         
@@ -221,6 +185,7 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verb
         variables: HashMap::new(),
         functions: HashMap::new(),
         signal: Signal::None,
+        corefuncs: Vec::new(),
 
         return_stack: Vec::new(),
         loop_stack: Vec::new(),
@@ -323,7 +288,7 @@ fn lex(content: &str) -> Vec<Token> {
 fn parse_tokens(tokens: Vec<Token>) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut i = 0;
-    let commands = ["print", "set", "continue", "return", "break", "if", "else", "end", "repeat", "func", "call", "wget", "fetch", "wait", "exit"];
+    let commands = ["print", "set", "continue", "return", "break", "if", "else", "end", "repeat", "func", "call", "wget", "fetch", "wait", "exit", "ask"];
 
     while i < tokens.len() {
         if commands.contains(&tokens[i].val.as_str()) {
@@ -428,13 +393,26 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                 println!("{}", output);
             }
             "ask" => {
+                let prompt = instr.args.get(1).map(|s| s.as_str()).unwrap_or("> ");
+                print!("{}", prompt);
+                
+                // CRITICAL: Flush stdout so the prompt appears BEFORE read_line
+                io::stdout().flush().unwrap();
+
                 let mut input = String::new();
                 match io::stdin().read_line(&mut input) {
                     Ok(_n) => {
-                        ctx.variables.insert(instr.args.get(0).expect("$cool").trim_start_matches("$").to_string(), input);
+                        let var_name = instr.args.get(0)
+                            .expect("$var missing")
+                            .trim_start_matches('$')
+                            .to_string();
+                        
+                        // Trim the newline from the user's input before saving
+                        ctx.variables.insert(var_name, input.trim().to_string());
+                        verbose_log(ctx, format!("user input: {}", input.trim().to_string()).as_str());
                     }
                     Err(e) => {
-                        ctx.report_error(format!("{}", e).as_str(), instr.line_num);
+                        ctx.report_error(&format!("{}", e), instr.line_num);
                     }
                 }
             }
@@ -469,6 +447,16 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
             //================//
             //---core stuff---//
             //================//
+            "coreadd" => {
+                let func_name = instr.args.get(0).expect("error finding args");
+                if func_name == "" {
+                    ctx.report_error("coreadd requires a command", instr.line_num);
+                } else if func_name == "error finding args" {
+                    ctx.report_error("was unable to parse coreadd args", instr.line_num);
+                } else {
+                    ctx.corefuncs.push(func_name.to_string());
+                }
+            }
             "wait" => {
                 std::thread::sleep(std::time::Duration::from_millis(instr.args.get(0).expect("invalid sleep time").parse::<u64>().unwrap()));
             }
@@ -548,7 +536,7 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                     }
                 }
 
-                // Mapping logic for actual calls (Keep this part)
+                // Mapping logic for actual calls
                 if let Some(passed_values) = ctx.arg_stack.pop() {
                     for (i, val_name) in instr.args.iter().skip(1).enumerate() {
                         if let Some(val) = passed_values.get(i) {
@@ -628,7 +616,7 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                 let is_true = evaluate(&instr.args, ctx).as_boolean().unwrap_or(false);
                 if !is_true {
                     if let Some(target) = instr.jump_to {
-                        ctx.pc = target; 
+                        ctx.pc = target + 1; 
                         continue; 
                     }
                 }
@@ -653,12 +641,10 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
                 if !ctx.return_stack.is_empty() {
                     // We only pop if we hit an explicit 'return' signal 
                     // OR we are at the physical end of the function (no more code in func).
-                    if ctx.signal == Signal::Return || is_at_function_bottom(ctx.pc, &program) {
-                        if let Some(saved_pc) = ctx.return_stack.pop() {
-                            ctx.pc = saved_pc;
-                            ctx.signal = Signal::None; // Clear return signal
-                            continue; // This returns us to the instruction AFTER 'call'
-                        }
+                    if let Some(saved_pc) = ctx.return_stack.pop() {
+                        ctx.pc = saved_pc;
+                        ctx.signal = Signal::None; // Clear return signal
+                        continue; // This returns us to the instruction AFTER 'call'
                     }
                 }
                 
@@ -667,7 +653,24 @@ fn execute(program: Vec<Instruction>, ctx: &mut Context) {
             }
             "exit" => std::process::exit(0),
             _ => {
-                println!("Unknown command: {}", instr.name);
+                if ctx.corefuncs.contains(&instr.name) {
+                    let name = &instr.name;
+                    if let Some(&target_pc) = ctx.functions.get(name) {
+                        let mut vals = Vec::new();
+                        for arg in instr.args.iter().skip(1) {
+                            vals.push(resolve_vars(arg, ctx));
+                        }
+                        ctx.arg_stack.push(vals);
+                        
+                        // Save the address to return to (the instruction AFTER call)
+                        ctx.return_stack.push(ctx.pc + 1); 
+                        
+                        ctx.pc = target_pc;
+                        continue; // Jump immediately to the 'func' line
+                    }
+                } else {
+                    ctx.report_error(format!("unknown command: {}", instr.name).as_str(), instr.line_num);
+                }
             }
         }
 

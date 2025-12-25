@@ -8,9 +8,9 @@ func greet $person
     set $$person "brozo"
 end
 
-call greet "developer"
-print "$person"
-print "$developer"
+ask $sigma "who are you brozo? "
+call greet $sigma
+print $$sigma
 wait 300
 set $epic 1 + 4
 repeat $epic as $n
