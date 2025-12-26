@@ -7,6 +7,17 @@ use std::io::{self, Write};
 use evalexpr::{HashMapContext, Value, eval_with_context, ContextWithMutableVariables};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+fn get_xeon_dir() -> PathBuf {
+    #[cfg(windows)]
+    let mut path = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    
+    #[cfg(unix)]
+    let mut path = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+
+    path.push(".xeon");
+    path
+}
+
 fn main() {
     let mut args: Vec<String> = env::args().collect();
     
@@ -390,7 +401,7 @@ fn parse_tokens(tokens: Vec<Token>, ctx: &Context) -> Vec<Instruction> {
     let base_commands = [
         "print", "set", "if", "else", "end", "repeat", "func", 
         "run", "ask", "coreadd", "wait", "exit", "fetch", 
-        "wget", "return", "break", "continue", "use"
+        "wget", "return", "break", "continue", "use", "ext", "extc"
     ];
 
     while i < tokens.len() {
@@ -625,72 +636,90 @@ fn execute(ctx: &mut Context) {
             //================//
             //---core stuff---//
             //================//
-            "ext" => {
+            "ext" | "extc" => {
+                let is_capture = instr.name == "extc";
                 let cmd_name = resolve_vars(&instr.args[0], ctx);
+                
+                // FORCE the path to ~/.xeon/bin
+                let cmd_path = get_xeon_dir().join("bin").join(&cmd_name);
+                
+                // Check if it exists before trying to run it
+                if !cmd_path.exists() {
+                    ctx.report_error(&format!("command not found in xeon/bin: {}", cmd_name), instr.line_num);
+                    return;
+                }
+
                 let args: Vec<String> = instr.args[1..].iter()
                     .map(|arg| resolve_vars(arg, ctx))
                     .collect();
 
-                let mut child = std::process::Command::new(cmd_name)
-                    .args(args)
-                    .spawn()
-                    .expect("failed to execute process");
+                let mut command = std::process::Command::new(cmd_path);
+                command.args(args);
 
-                // Wait for it to finish so the script doesn't outrun the build
-                child.wait().ok();
-            }
-            "extc" => {
-                let cmd_name = resolve_vars(&instr.args[0], ctx);
-                let args: Vec<String> = instr.args[1..].iter()
-                    .map(|arg| resolve_vars(arg, ctx))
-                    .collect();
-
-                let output = std::process::Command::new(cmd_name)
-                    .args(args)
-                    .output(); // .output() captures stdout and stderr automatically
-
-                match output {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        ctx.variables.insert("res".to_string(), stdout);
+                if is_capture {
+                    match command.output() {
+                        Ok(out) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                            ctx.variables.insert("res".to_string(), stdout);
+                        }
+                        Err(e) => ctx.report_error(&format!("extc failed: {}", e), instr.line_num),
                     }
-                    Err(e) => ctx.report_error(&format!("extc failed: {}", e), instr.line_num),
+                } else {
+                    match command.spawn() {
+                        Ok(mut child) => { child.wait().ok(); }
+                        Err(e) => ctx.report_error(&format!("ext failed: {}", e), instr.line_num),
+                    }
                 }
             }
             "use" => {
-                let mut filename = resolve_vars(&instr.args[0], ctx);
-                if !filename.ends_with(".xeo") {
-                    let with_ext = format!("{}.xeo", filename);
-                    // Only switch if the .xeo version actually exists on disk
-                    if std::path::Path::new(&with_ext).exists() {
-                        filename = with_ext;
+                let raw_name = resolve_vars(&instr.args[0], ctx);
+                let mut final_path = None;
+
+                // 1. Define the search locations in order of priority
+                let local_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let xeon_lib_dir = get_xeon_dir().join("lib"); // Points to ~/.xeon/lib
+
+                let search_dirs = vec![local_dir, xeon_lib_dir];
+
+                'search: for dir in search_dirs {
+                    // Step A: Try the exact name
+                    let exact_path = dir.join(&raw_name);
+                    if exact_path.is_file() {
+                        final_path = Some(exact_path);
+                        break 'search;
+                    }
+
+                    // Step B: Try with .xeo extension
+                    if !raw_name.ends_with(".xeo") {
+                        let path_with_ext = dir.join(format!("{}.xeo", raw_name));
+                        if path_with_ext.is_file() {
+                            final_path = Some(path_with_ext);
+                            break 'search;
+                        }
                     }
                 }
-                if ctx.loaded_modules.contains(&filename) {
-                    return; // Already loaded, skip to avoid infinite loops
-                }
-                ctx.loaded_modules.insert(filename.clone());
-                
-                match std::fs::read_to_string(&filename) {
-                    Ok(content) => {
-                        // 1. Parse the external file into a separate list
-                        let sub_program = parse(&content, ctx);
-                        
-                        // 2. Save the current state
-                        let old_pc = ctx.pc;
-                        let old_program = std::mem::replace(&mut ctx.program, sub_program);
-                        
-                        // 3. Reset PC to start of the NEW file
-                        ctx.pc = 0;
-                        
-                        // 4. Execute the sub-program using the same Context
-                        execute(ctx);
-                        
-                        // 5. Restore the original program and PC
-                        ctx.program = old_program;
-                        ctx.pc = old_pc; 
+
+                match final_path {
+                    Some(path) => {
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => {
+                                verbose_log(ctx, &format!("using: {:?}", path));
+                                
+                                // Standard sub-parser swap to protect global PC/program
+                                let sub_program = parse(&content, ctx);
+                                let old_pc = ctx.pc;
+                                let old_program = std::mem::replace(&mut ctx.program, sub_program);
+                                
+                                ctx.pc = 0;
+                                execute(ctx);
+                                
+                                ctx.program = old_program;
+                                ctx.pc = old_pc;
+                            }
+                            Err(e) => ctx.report_error(&format!("failed to read module {:?}: {}", path, e), instr.line_num),
+                        }
                     }
-                    Err(e) => ctx.report_error(&format!("use failed: {}", e), instr.line_num),
+                    None => ctx.report_error(&format!("module '{}' not found in local dir or ~/.xeon/lib", raw_name), instr.line_num),
                 }
             }
             "wait" => {
