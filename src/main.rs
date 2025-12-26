@@ -193,7 +193,7 @@ fn is_block_complete(input: &str) -> bool {
         if !in_quotes {
             // Check for block starts (must be surrounded by boundaries or start of string)
             let remaining = &input[i..];
-            if remaining.starts_with("func") || remaining.starts_with("if") || remaining.starts_with("repeat") {
+            if remaining.starts_with("func") || remaining.starts_with("if") || remaining.starts_with("repeat") || remaining.starts_with("def") || remaining.starts_with("function") {
                 depth += 1;
             } else if remaining.starts_with("end") {
                 depth -= 1;
@@ -401,7 +401,8 @@ fn parse_tokens(tokens: Vec<Token>, ctx: &Context) -> Vec<Instruction> {
     let base_commands = [
         "print", "set", "if", "else", "end", "repeat", "func", 
         "run", "ask", "coreadd", "wait", "exit", "fetch", 
-        "wget", "return", "break", "continue", "use", "ext", "extc"
+        "wget", "return", "break", "continue", "use", "ext", "extc", "input",
+        "sleep", "import", "call", "def", "function", "let"
     ];
 
     while i < tokens.len() {
@@ -531,7 +532,7 @@ fn execute(ctx: &mut Context) {
                 let output = resolve_vars(clean_multiline(&instr.args.join(" ")).as_str(), ctx);
                 println!("{}", output);
             }
-            "ask" => {
+            "ask" | "input" => {
                 let prompt = instr.args.get(1).map(|s| s.as_str()).unwrap_or("> ");
                 print!("{}", prompt);
                 
@@ -612,238 +613,6 @@ fn execute(ctx: &mut Context) {
                 ctx.variables.insert(dest_var.clone(), value);
             }
             //================//
-            //---filesystem---//
-            //================//
-            "dir" => {
-                let new_path = resolve_vars(&instr.args[0], ctx);
-                if let Err(e) = std::env::set_current_dir(&new_path) {
-                    ctx.report_error(&format!("dir: could not change to {}: {}", new_path, e), instr.line_num);
-                }
-            }
-            "ls" => {
-                let path = resolve_vars(&instr.args[0], ctx);
-                let prefix = resolve_vars(&instr.args[1], ctx); // e.g., "file"
-
-                if let Ok(entries) = std::fs::read_dir(path) {
-                    let mut files = Vec::new();
-                    
-                    for entry in entries.flatten() {
-                        if let Ok(name) = entry.file_name().into_string() {
-                            files.push(name);
-                        }
-                    }
-
-                    // 1. Individual variables: $prefix1, $prefix2...
-                    for (i, name) in files.iter().enumerate() {
-                        ctx.variables.insert(format!("{}{}", prefix, i + 1), name.clone());
-                    }
-
-                    // 2. $prefixlist (New-line separated)
-                    ctx.variables.insert(format!("{}list", prefix), files.join("\n"));
-
-                    // 3. $prefixtotal
-                    ctx.variables.insert(format!("{}total", prefix), files.len().to_string());
-                } else {
-                    ctx.report_error("ls: directory not found", instr.line_num);
-                }
-            }
-            "read" => {
-                let path = resolve_vars(&instr.args[0], ctx);
-                let var_name = resolve_vars(&instr.args[1], ctx);
-
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        ctx.variables.insert(var_name, content);
-                    }
-                    Err(e) => ctx.report_error(&format!("read: failed to read {}: {}", path, e), instr.line_num),
-                }
-            }
-            "append" => {
-                let path = resolve_vars(&instr.args[0], ctx);
-                let text = resolve_vars(&instr.args[1], ctx);
-                use std::io::Write;
-
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path);
-
-                match file {
-                    Ok(mut f) => { let _ = writeln!(f, "{}", text); }
-                    Err(e) => ctx.report_error(&format!("append failed: {}", e), instr.line_num),
-                }
-            }
-            "move" => {
-                let src = std::path::PathBuf::from(resolve_vars(&instr.args[0], ctx));
-                let dest = std::path::PathBuf::from(resolve_vars(&instr.args[1], ctx));
-
-                if src.is_dir() && dest.is_dir() {
-                    // Special Logic: Move contents and delete src
-                    if let Ok(entries) = std::fs::read_dir(&src) {
-                        for entry in entries.flatten() {
-                            let file_name = entry.file_name();
-                            let dest_file = dest.join(file_name);
-                            let _ = std::fs::rename(entry.path(), dest_file);
-                        }
-                        let _ = std::fs::remove_dir(src); // Only works if empty (which it should be now)
-                    }
-                } else {
-                    // Standard Move: File to File, or File to Dir, or New Dir name
-                    if let Err(e) = std::fs::rename(&src, &dest) {
-                        ctx.report_error(&format!("move failed: {}", e), instr.line_num);
-                    }
-                }
-            }
-            "replace" => {
-                let path = resolve_vars(&instr.args[0], ctx);
-                let text = resolve_vars(&instr.args[1], ctx);
-                
-                if let Err(e) = std::fs::write(&path, text) {
-                    ctx.report_error(&format!("replace failed: {}", e), instr.line_num);
-                }
-            }
-            "copy" => {
-                let src = std::path::PathBuf::from(resolve_vars(&instr.args[0], ctx));
-                let dest = std::path::PathBuf::from(resolve_vars(&instr.args[1], ctx));
-
-                if src.is_dir() && dest.is_dir() {
-                    // Smart Merge: Copy every item inside src to dest
-                    if let Ok(entries) = std::fs::read_dir(&src) {
-                        for entry in entries.flatten() {
-                            let name = entry.file_name();
-                            let target = dest.join(name);
-                            // Note: std::fs::copy only works for files
-                            if entry.path().is_file() {
-                                let _ = std::fs::copy(entry.path(), target);
-                            }
-                            // If you need recursive folder copying, you'd call a helper here
-                        }
-                    }
-                } else if src.is_file() {
-                    if let Err(e) = std::fs::copy(&src, &dest) {
-                        ctx.report_error(&format!("copy failed: {}", e), instr.line_num);
-                    }
-                }
-            }
-            "make" => {
-                let path = resolve_vars(&instr.args[0], ctx);
-                if let Err(e) = std::fs::File::create(&path) {
-                    ctx.report_error(&format!("make: could not create file {}: {}", path, e), instr.line_num);
-                }
-            }
-            "mkdir" => {
-                let path = resolve_vars(&instr.args[0], ctx);
-                // create_dir_all handles nested folders and doesn't error if the path exists
-                if let Err(e) = std::fs::create_dir_all(&path) {
-                    ctx.report_error(&format!("mkdir: failed to create {}: {}", path, e), instr.line_num);
-                }
-            }
-            "link" => {
-                let target = resolve_vars(&instr.args[0], ctx);
-                let link_path = resolve_vars(&instr.args[1], ctx);
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::symlink;
-                    if let Err(e) = symlink(&target, &link_path) {
-                        ctx.report_error(&format!("link failed: {}", e), instr.line_num);
-                    }
-                }
-
-                #[cfg(windows)]
-                {
-                    let target_path = std::path::Path::new(&target);
-                    let res = if target_path.is_dir() {
-                        std::os::windows::fs::symlink_dir(&target, &link_path)
-                    } else {
-                        std::os::windows::fs::symlink_file(&target, &link_path)
-                    };
-                    if let Err(e) = res {
-                        ctx.report_error(&format!("link failed: {}", e), instr.line_num);
-                    }
-                }
-            }
-            "chmod" => {
-                let path = resolve_vars(&instr.args[0], ctx);
-                
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(metadata) = std::fs::metadata(&path) {
-                        let mut perms = metadata.permissions();
-                        perms.set_mode(0o755); // Standard rwxr-xr-x
-                        let _ = std::fs::set_permissions(&path, perms);
-                    }
-                }
-                
-                #[cfg(windows)]
-                {
-                    // Windows doesn't have +x, but we can ensure it's not read-only
-                    if let Ok(metadata) = std::fs::metadata(&path) {
-                        let mut perms = metadata.permissions();
-                        perms.set_readonly(false);
-                        let _ = std::fs::set_permissions(&path, perms);
-                    }
-                }
-            }
-            "delete" => {
-                let path = std::path::PathBuf::from(resolve_vars(&instr.args[0], ctx));
-                
-                if path.is_dir() {
-                    if let Err(e) = std::fs::remove_dir_all(&path) {
-                        ctx.report_error(&format!("delete dir failed: {}", e), instr.line_num);
-                    }
-                } else {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        ctx.report_error(&format!("delete file failed: {}", e), instr.line_num);
-                    }
-                }
-            }
-            "wget" => {
-                let url = resolve_vars(&instr.args[0], ctx);
-                let path = resolve_vars(&instr.args[1], ctx);
-
-                verbose_log(ctx, &format!("downloading {}...", url));
-
-                match minreq::get(&url).send_lazy() {
-                    Ok(res) => {
-                        let mut file = std::fs::File::create(&path).ok();
-                        let mut buffer = Vec::with_capacity(8192); // 8KB buffer
-
-                        for byte_result in res {
-                            // 1. CHECK INTERRUPT (Check every byte is fine, it's just a flag check)
-                            if SHOULD_STOP.load(Ordering::SeqCst) {
-                                println!("\x1b[33m\n[xeo] Aborted. Cleaning up...\x1b[0m");
-                                drop(file); 
-                                let _ = std::fs::remove_file(&path);
-                                return; 
-                            }
-
-                            if let Ok((byte, _)) = byte_result {
-                                buffer.push(byte);
-                                
-                                // 2. Only write to disk when the buffer is full
-                                if buffer.len() >= 8192 {
-                                    if let Some(ref mut f) = file {
-                                        use std::io::Write;
-                                        let _ = f.write_all(&buffer);
-                                    }
-                                    buffer.clear();
-                                }
-                            }
-                        }
-                        // 3. Write anything left in the buffer at the end
-                        if !buffer.is_empty() {
-                            if let Some(ref mut f) = file {
-                                use std::io::Write;
-                                let _ = f.write_all(&buffer).ok();
-                            }
-                        }
-                    }
-                    Err(e) => ctx.report_error(&format!("wget failed: {}", e), instr.line_num),
-                }
-            }
-            //================//
             //---core stuff---//
             //================//
             "ext" | "extc" => {
@@ -881,7 +650,7 @@ fn execute(ctx: &mut Context) {
                     }
                 }
             }
-            "use" => {
+            "use" | "import" => {
                 let raw_name = resolve_vars(&instr.args[0], ctx);
                 let mut final_path = None;
 
@@ -932,7 +701,7 @@ fn execute(ctx: &mut Context) {
                     None => ctx.report_error(&format!("module '{}' not found in local dir or ~/.xeon/lib", raw_name), instr.line_num),
                 }
             }
-            "wait" => {
+            "wait" | "sleep" => {
                 let ms_str = instr.args.get(0).map(|s| s.as_str()).unwrap_or("0");
                 if let Ok(mut remaining_ms) = ms_str.parse::<u64>() {
                     // Break the wait into 100ms chunks
@@ -950,7 +719,7 @@ fn execute(ctx: &mut Context) {
                     }
                 }
             }
-            "set" => {
+            "set" | "let" => {
                 let arg0 = &instr.args[0];
                 
                 let var_name = if arg0.starts_with("$$") {
@@ -1016,7 +785,7 @@ fn execute(ctx: &mut Context) {
             "return" => {
                 ctx.signal = Signal::Return;
             }
-            "func" => {
+            "func" | "def" | "function" => {
                 // If the arg_stack is empty, it means we didn't 'call' this.
                 // We are just naturally reading the file. SKIP IT.
                 if ctx.arg_stack.is_empty() {
@@ -1036,7 +805,7 @@ fn execute(ctx: &mut Context) {
                     }
                 }
             }
-            "run" => {
+            "run" | "call" => {
                 let name = &instr.args[0];
                 if let Some(&target_pc) = ctx.functions.get(name) {
                     let mut vals = Vec::new();
