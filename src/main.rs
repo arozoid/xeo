@@ -524,6 +524,9 @@ fn execute(ctx: &mut Context) {
         }
 
         match instr.name.as_str() {
+            //================//
+            //----general----//
+            //================//
             "print" => {
                 let output = resolve_vars(clean_multiline(&instr.args.join(" ")).as_str(), ctx);
                 println!("{}", output);
@@ -587,6 +590,213 @@ fn execute(ctx: &mut Context) {
                         ctx.variables.insert("res".to_string(), final_body);
                     }
                     Err(e) => ctx.report_error(&format!("fetch failed: {}", e), instr.line_num),
+                }
+            }
+            "find" => {
+                let haystack = resolve_vars(&instr.args[0], ctx);
+                let needle = resolve_vars(&instr.args[1], ctx);
+                let dest_var = &instr.args[2]; // The $bool variable name
+
+                let found = haystack.contains(&needle);
+                ctx.variables.insert(dest_var.clone(), found.to_string());
+            }
+            "get" => {
+                // args[0] is the "string expression" (e.g., "pkg$i")
+                // args[1] is the "as" keyword (we can skip it)
+                // args[2] is the destination variable name
+                
+                let dynamic_name = resolve_vars(&instr.args[0], ctx);
+                let value = ctx.variables.get(&dynamic_name).cloned().unwrap_or_default();
+                
+                let dest_var = &instr.args[2];
+                ctx.variables.insert(dest_var.clone(), value);
+            }
+            //================//
+            //---filesystem---//
+            //================//
+            "dir" => {
+                let new_path = resolve_vars(&instr.args[0], ctx);
+                if let Err(e) = std::env::set_current_dir(&new_path) {
+                    ctx.report_error(&format!("dir: could not change to {}: {}", new_path, e), instr.line_num);
+                }
+            }
+            "ls" => {
+                let path = resolve_vars(&instr.args[0], ctx);
+                let prefix = resolve_vars(&instr.args[1], ctx); // e.g., "file"
+
+                if let Ok(entries) = std::fs::read_dir(path) {
+                    let mut files = Vec::new();
+                    
+                    for entry in entries.flatten() {
+                        if let Ok(name) = entry.file_name().into_string() {
+                            files.push(name);
+                        }
+                    }
+
+                    // 1. Individual variables: $prefix1, $prefix2...
+                    for (i, name) in files.iter().enumerate() {
+                        ctx.variables.insert(format!("{}{}", prefix, i + 1), name.clone());
+                    }
+
+                    // 2. $prefixlist (New-line separated)
+                    ctx.variables.insert(format!("{}list", prefix), files.join("\n"));
+
+                    // 3. $prefixtotal
+                    ctx.variables.insert(format!("{}total", prefix), files.len().to_string());
+                } else {
+                    ctx.report_error("ls: directory not found", instr.line_num);
+                }
+            }
+            "read" => {
+                let path = resolve_vars(&instr.args[0], ctx);
+                let var_name = resolve_vars(&instr.args[1], ctx);
+
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        ctx.variables.insert(var_name, content);
+                    }
+                    Err(e) => ctx.report_error(&format!("read: failed to read {}: {}", path, e), instr.line_num),
+                }
+            }
+            "append" => {
+                let path = resolve_vars(&instr.args[0], ctx);
+                let text = resolve_vars(&instr.args[1], ctx);
+                use std::io::Write;
+
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path);
+
+                match file {
+                    Ok(mut f) => { let _ = writeln!(f, "{}", text); }
+                    Err(e) => ctx.report_error(&format!("append failed: {}", e), instr.line_num),
+                }
+            }
+            "move" => {
+                let src = std::path::PathBuf::from(resolve_vars(&instr.args[0], ctx));
+                let dest = std::path::PathBuf::from(resolve_vars(&instr.args[1], ctx));
+
+                if src.is_dir() && dest.is_dir() {
+                    // Special Logic: Move contents and delete src
+                    if let Ok(entries) = std::fs::read_dir(&src) {
+                        for entry in entries.flatten() {
+                            let file_name = entry.file_name();
+                            let dest_file = dest.join(file_name);
+                            let _ = std::fs::rename(entry.path(), dest_file);
+                        }
+                        let _ = std::fs::remove_dir(src); // Only works if empty (which it should be now)
+                    }
+                } else {
+                    // Standard Move: File to File, or File to Dir, or New Dir name
+                    if let Err(e) = std::fs::rename(&src, &dest) {
+                        ctx.report_error(&format!("move failed: {}", e), instr.line_num);
+                    }
+                }
+            }
+            "replace" => {
+                let path = resolve_vars(&instr.args[0], ctx);
+                let text = resolve_vars(&instr.args[1], ctx);
+                
+                if let Err(e) = std::fs::write(&path, text) {
+                    ctx.report_error(&format!("replace failed: {}", e), instr.line_num);
+                }
+            }
+            "copy" => {
+                let src = std::path::PathBuf::from(resolve_vars(&instr.args[0], ctx));
+                let dest = std::path::PathBuf::from(resolve_vars(&instr.args[1], ctx));
+
+                if src.is_dir() && dest.is_dir() {
+                    // Smart Merge: Copy every item inside src to dest
+                    if let Ok(entries) = std::fs::read_dir(&src) {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            let target = dest.join(name);
+                            // Note: std::fs::copy only works for files
+                            if entry.path().is_file() {
+                                let _ = std::fs::copy(entry.path(), target);
+                            }
+                            // If you need recursive folder copying, you'd call a helper here
+                        }
+                    }
+                } else if src.is_file() {
+                    if let Err(e) = std::fs::copy(&src, &dest) {
+                        ctx.report_error(&format!("copy failed: {}", e), instr.line_num);
+                    }
+                }
+            }
+            "make" => {
+                let path = resolve_vars(&instr.args[0], ctx);
+                if let Err(e) = std::fs::File::create(&path) {
+                    ctx.report_error(&format!("make: could not create file {}: {}", path, e), instr.line_num);
+                }
+            }
+            "mkdir" => {
+                let path = resolve_vars(&instr.args[0], ctx);
+                // create_dir_all handles nested folders and doesn't error if the path exists
+                if let Err(e) = std::fs::create_dir_all(&path) {
+                    ctx.report_error(&format!("mkdir: failed to create {}: {}", path, e), instr.line_num);
+                }
+            }
+            "link" => {
+                let target = resolve_vars(&instr.args[0], ctx);
+                let link_path = resolve_vars(&instr.args[1], ctx);
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+                    if let Err(e) = symlink(&target, &link_path) {
+                        ctx.report_error(&format!("link failed: {}", e), instr.line_num);
+                    }
+                }
+
+                #[cfg(windows)]
+                {
+                    let target_path = std::path::Path::new(&target);
+                    let res = if target_path.is_dir() {
+                        std::os::windows::fs::symlink_dir(&target, &link_path)
+                    } else {
+                        std::os::windows::fs::symlink_file(&target, &link_path)
+                    };
+                    if let Err(e) = res {
+                        ctx.report_error(&format!("link failed: {}", e), instr.line_num);
+                    }
+                }
+            }
+            "chmod" => {
+                let path = resolve_vars(&instr.args[0], ctx);
+                
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(metadata) = std::fs::metadata(&path) {
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o755); // Standard rwxr-xr-x
+                        let _ = std::fs::set_permissions(&path, perms);
+                    }
+                }
+                
+                #[cfg(windows)]
+                {
+                    // Windows doesn't have +x, but we can ensure it's not read-only
+                    if let Ok(metadata) = std::fs::metadata(&path) {
+                        let mut perms = metadata.permissions();
+                        perms.set_readonly(false);
+                        let _ = std::fs::set_permissions(&path, perms);
+                    }
+                }
+            }
+            "delete" => {
+                let path = std::path::PathBuf::from(resolve_vars(&instr.args[0], ctx));
+                
+                if path.is_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(&path) {
+                        ctx.report_error(&format!("delete dir failed: {}", e), instr.line_num);
+                    }
+                } else {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        ctx.report_error(&format!("delete file failed: {}", e), instr.line_num);
+                    }
                 }
             }
             "wget" => {

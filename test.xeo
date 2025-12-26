@@ -19,6 +19,8 @@ print "
 is this thing working?
 idk
 "
+set $var "does" + "this work?"
+print "$var"
 wait 300
 set $epic2 1 + 4
 repeat 3 as $n
