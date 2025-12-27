@@ -4,8 +4,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use evalexpr::{HashMapContext, Value, eval_with_context, ContextWithMutableVariables};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 fn get_xeon_dir() -> PathBuf {
     #[cfg(windows)]
@@ -24,7 +22,6 @@ fn main() {
     // 1. Detect and remove flags
     let verbose = args.iter().any(|arg| arg == "-v" || arg == "--verbose");
     let ultra_verbose = args.iter().any(|arg| arg == "-vv" || arg == "--trace" || arg == "--debug");
-    let reverse = args.iter().any(|arg| arg == "-r" || arg == "--reverse");
     let version = args.iter().any(|arg| arg == "-V" || arg == "--version");
 
     let verbose = verbose || ultra_verbose;
@@ -35,16 +32,16 @@ fn main() {
     // 2. Decide mode based on remaining args
     if version {
         println!("{BLUE}the .xeo scripting lang{ESC}");
-        println!("v4.0.0 build number 400-3");
+        println!("v4.0.0 snapshot 25w52e");
         return;
     }
     if args.len() < 2 {
         // Pass flags into your mode handler
-        mode("interactive", &args, verbose, reverse, ultra_verbose);
+        mode("interactive", &args, verbose, ultra_verbose);
         return;
     }
     
-    mode("script", &args, verbose, reverse, ultra_verbose);
+    mode("script", &args, verbose, ultra_verbose);
 }
 
 //================================//
@@ -74,7 +71,6 @@ pub struct Context {
     pub loaded_modules: HashSet<String>,
     pub ultra_verbose: bool,
     pub verbose: bool,
-    pub reverse: bool,
 }
 
 impl Context {
@@ -97,12 +93,37 @@ pub enum Signal {
     Return,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum Val {
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+impl Val {
+    // this replaces the missing method the compiler is screaming about
+    fn as_boolean(&self) -> Option<bool> {
+        match self {
+            Val::Bool(b) => Some(*b),
+            // maybe you want "true" strings to count as true? 
+            Val::Str(s) => Some(s == "true"), 
+            _ => None,
+        }
+    }
+
+    fn to_string(&self) -> String {
+        match self {
+            Val::Float(f) => f.to_string(),
+            Val::Bool(b) => b.to_string(),
+            Val::Str(s) => s.clone(),
+        }
+    }
+}
+
 const RED: &str = "\x1b[31m";
 const BLUE: &str = "\x1b[34m";
 const DIM: &str = "\x1b[2m";
 const ESC: &str = "\x1b[0m";
-
-static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
 
 //================================//
 //------- helper functions -------//
@@ -127,42 +148,6 @@ fn resolve_vars(text: &str, ctx: &Context) -> String {
     result
 }
 
-fn evaluate(args: &[String], ctx: &Context) -> Value {
-    let mut expr_parts = Vec::new();
-    let operators = ["==", "!=", ">", "<", ">=", "<=", "&&", "||", "+", "-", "*", "/"];
-
-    for arg in args {
-        if arg.starts_with('$') {
-            // Variable: strip $ for evalexpr lookup
-            expr_parts.push(arg.trim_start_matches('$').to_string());
-        } else if operators.contains(&arg.as_str()) || arg.parse::<f64>().is_ok() {
-            // Operator or Number: leave as-is
-            expr_parts.push(arg.clone());
-        } else {
-            // String Literal: wrap in quotes if not already quoted
-            if arg.starts_with('"') && arg.ends_with('"') {
-                expr_parts.push(arg.clone());
-            } else {
-                expr_parts.push(format!("\"{}\"", arg));
-            }
-        }
-    }
-    
-    let expr = expr_parts.join(" ");
-    
-    let mut eval_ctx = HashMapContext::new();
-    for (name, val) in &ctx.variables {
-        let clean_name = name.trim_start_matches('$');
-        if let Ok(n) = val.parse::<f64>() {
-            let _ = eval_ctx.set_value(clean_name.into(), Value::Float(n));
-        } else {
-            let _ = eval_ctx.set_value(clean_name.into(), Value::String(val.clone()));
-        }
-    }
-
-    eval_with_context(&expr, &eval_ctx).unwrap_or(Value::from(false))
-}
-
 fn verbose_log(ctx: &Context, msg: &str) {
     if ctx.verbose {
         println!("{BLUE}[xeo] dbg: {ESC}{msg}");
@@ -178,30 +163,155 @@ fn clean_multiline(input: &str) -> String {
         .to_string()
 }
 
-fn is_block_complete(input: &str) -> bool {
-    let mut depth = 0;
-    let mut in_quotes = false;
+//================================//
+//-------godlike evaluation-------//
+//================================//
+fn evaluate(args: &[String], ctx: &Context) -> Val {
+    // 1. Flatten args and resolve variables first
+    // We join with spaces to ensure clean tokenization later
+    let raw_expr = args.join(" ");
+    let resolved_expr = resolve_vars(&raw_expr, ctx); // Your existing resolve function
+
+    // 2. Tokenize (simple splitter that keeps operators separate)
+    let tokens = tokenize(&resolved_expr);
+
+    // 3. Shunting-Yard: Convert Infix (1 + 2) to RPN (1 2 +)
+    let rpn = to_rpn(tokens);
+
+    // 4. Evaluate the RPN stack
+    solve_rpn(rpn)
+}
+
+fn tokenize(expr: &str) -> Vec<String> {
+    // This splits by spaces but also ensures operators are treated as separate tokens
+    // simple hack: put spaces around operators then split
+    let mut s = expr.to_string();
+    let ops = ["==", "!=", ">=", "<=", "&&", "||", "+", "-", "*", "/", "(", ")", "<", ">", "%", "^"];
     
-    // Simple character scan for quotes and block keywords
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '"' && (i == 0 || chars[i-1] != '\\') {
-            in_quotes = !in_quotes;
-        }
-        
-        if !in_quotes {
-            // Check for block starts (must be surrounded by boundaries or start of string)
-            let remaining = &input[i..];
-            if remaining.starts_with("func") || remaining.starts_with("if") || remaining.starts_with("repeat") || remaining.starts_with("def") || remaining.starts_with("function") {
-                depth += 1;
-            } else if remaining.starts_with("end") {
-                depth -= 1;
-            }
-        }
-        i += 1;
+    // Replace double-char ops first to protect them, then single chars
+    // (In a real tokenizer you'd walk the string, but this is the "lazy/small" way)
+    for op in ops {
+        s = s.replace(op, &format!(" {} ", op));
     }
-    depth <= 0
+    
+    s.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+fn to_rpn(tokens: Vec<String>) -> Vec<String> {
+    let mut output_queue = Vec::new();
+    let mut op_stack = Vec::new();
+
+    for token in tokens {
+        if let Ok(_) = token.parse::<f64>() {
+            output_queue.push(token);
+        } else if token == "true" || token == "false" || token.starts_with('"') {
+            output_queue.push(token);
+        } else if token == "(" {
+            op_stack.push(token);
+        } else if token == ")" {
+            while let Some(top) = op_stack.pop() {
+                if top == "(" { break; }
+                output_queue.push(top);
+            }
+        } else {
+            // It's an operator
+            while let Some(top) = op_stack.last() {
+                if top == "(" || precedence(top) < precedence(&token) { break; }
+                output_queue.push(op_stack.pop().unwrap());
+            }
+            op_stack.push(token);
+        }
+    }
+
+    while let Some(op) = op_stack.pop() {
+        output_queue.push(op);
+    }
+    output_queue
+}
+
+fn solve_rpn(rpn: Vec<String>) -> Val {
+    let mut stack: Vec<Val> = Vec::new();
+
+    for token in rpn {
+        if let Ok(n) = token.parse::<f64>() {
+            stack.push(Val::Float(n));
+        } else if let Ok(b) = token.parse::<bool>() {
+            stack.push(Val::Bool(b));
+        } else if token.starts_with('"') {
+            stack.push(Val::Str(token.trim_matches('"').to_string()));
+        } else {
+            // It's an operator, pop two values
+            let b = stack.pop().unwrap_or(Val::Float(0.0));
+            let a = stack.pop().unwrap_or(Val::Float(0.0));
+            let res = apply_op(&token, a, b);
+            stack.push(res);
+        }
+    }
+
+    stack.pop().unwrap_or(Val::Bool(false))
+}
+
+fn precedence(op: &str) -> u8 {
+    match op {
+        "||" => 1,
+        "&&" => 2,
+        "==" | "!=" => 3,
+        "<" | ">" | "<=" | ">=" => 4,
+        "+" | "-" => 5,
+        "*" | "/" | "%" => 6,
+        "^" => 7,
+        _ => 0,
+    }
+}
+
+fn apply_op(op: &str, a: Val, b: Val) -> Val {
+    // Helper to unwrap numbers (defaulting to 0.0 if type mismatch)
+    let get_nums = |v1: &Val, v2: &Val| -> (f64, f64) {
+        let n1 = match v1 { Val::Float(f) => *f, _ => 0.0 };
+        let n2 = match v2 { Val::Float(f) => *f, _ => 0.0 };
+        (n1, n2)
+    };
+    
+    // Helper for bools
+    let get_bools = |v1: &Val, v2: &Val| -> (bool, bool) {
+        let b1 = match v1 { Val::Bool(b) => *b, _ => false };
+        let b2 = match v2 { Val::Bool(b) => *b, _ => false };
+        (b1, b2)
+    };
+
+    match op {
+        // Math
+        "+" => { let (x, y) = get_nums(&a, &b); Val::Float(x + y) },
+        "-" => { let (x, y) = get_nums(&a, &b); Val::Float(x - y) },
+        "*" => { let (x, y) = get_nums(&a, &b); Val::Float(x * y) },
+        "/" => { let (x, y) = get_nums(&a, &b); Val::Float(x / y) },
+        "%" => { let (x, y) = get_nums(&a, &b); Val::Float(x % y) },
+        "^" => { let (x, y) = get_nums(&a, &b); Val::Float(x.powf(y)) },
+        
+        // Comparison
+        "==" => match (a, b) {
+            (Val::Float(x), Val::Float(y)) => Val::Bool(x == y),
+            (Val::Bool(x), Val::Bool(y)) => Val::Bool(x == y),
+            (Val::Str(x), Val::Str(y)) => Val::Bool(x == y),
+            _ => Val::Bool(false),
+        },
+        "!=" => match (a, b) { // lazy impl: generic non-equality
+             (Val::Float(x), Val::Float(y)) => Val::Bool(x != y),
+             (Val::Bool(x), Val::Bool(y)) => Val::Bool(x != y),
+             (Val::Str(x), Val::Str(y)) => Val::Bool(x != y),
+             _ => Val::Bool(true),
+        },
+        ">" => { let (x, y) = get_nums(&a, &b); Val::Bool(x > y) },
+        "<" => { let (x, y) = get_nums(&a, &b); Val::Bool(x < y) },
+        ">=" => { let (x, y) = get_nums(&a, &b); Val::Bool(x >= y) },
+        "<=" => { let (x, y) = get_nums(&a, &b); Val::Bool(x <= y) },
+
+        // Logic
+        "&&" => { let (x, y) = get_bools(&a, &b); Val::Bool(x && y) },
+        "||" => { let (x, y) = get_bools(&a, &b); Val::Bool(x || y) },
+
+        _ => Val::Bool(false),
+    }
 }
 
 //================================//
@@ -219,9 +329,9 @@ fn read_xeo(path: &PathBuf, ctx: &mut Context) -> Vec<Instruction> {
     }
 }
 
-fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verbose: bool) {
+fn mode(mode: &str, args: &Vec<String>, verbose: bool, ultra_verbose: bool) {
     // Create one context that lives as long as the mode
-    let path_str = args.get(1).cloned().unwrap_or_else(|| String::from("interactive"));
+    let path_str = args.get(1).cloned().unwrap_or_else(|| String::from(""));
     let mut ctx = Context {
         variables: HashMap::new(),
         functions: HashMap::new(),
@@ -238,72 +348,10 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verb
         loaded_modules: HashSet::new(),
         ultra_verbose,
         verbose,
-        reverse,
     };
     let script_path = PathBuf::from(&path_str);
 
     match mode {
-        "interactive" => {
-            ctrlc::set_handler(move || {
-                SHOULD_STOP.store(true, Ordering::SeqCst);
-                println!("\n{DIM}interrupted (use 'exit' to exit interpreter){ESC}");
-            }).ok();
-
-            println!("{DIM}arrow keys for history, enter for execute/new line.{ESC}");
-            println!("{BLUE}xeo v4.0.0 (interactive){ESC}");
-
-            use rustyline::error::ReadlineError;
-            use rustyline::{Cmd, DefaultEditor, Modifiers, KeyCode, KeyEvent};
-
-            let mut rl = DefaultEditor::new().unwrap();
-            let mut accumulator = String::new();
-
-            rl.bind_sequence(
-                KeyEvent(KeyCode::Tab, Modifiers::NONE), 
-                Cmd::Insert(1, "  ".to_string()) // Inserts exactly 4 spaces
-            );
-
-            loop {
-                // Change prompt if we are inside a block
-                let prompt = if accumulator.is_empty() { "\x1b[34m>>\x1b[0m " } else { "\x1b[34m..\x1b[0m " };
-                
-                let readline = rl.readline(prompt);
-                match readline {
-                    Ok(line) => {
-                        if line.trim() == "exit" { break; }
-                        
-                        // Add to history so Up/Down arrows work
-                        let _ = rl.add_history_entry(line.as_str());
-                        
-                        accumulator.push_str(&line);
-                        accumulator.push('\n');
-
-                        if is_block_complete(&accumulator) {
-                            let new_instrs = parse(&accumulator, &mut ctx);
-                            
-                            // Add to permanent memory
-                            ctx.program.extend(new_instrs);
-                            
-                            // Execute
-                            execute(&mut ctx);
-                            
-                            accumulator.clear();
-                        }
-                    }
-                    Err(ReadlineError::Interrupted) => { // Ctrl-C
-                        println!("{DIM}interrupted (use 'exit' to exit interpreter){ESC}");
-                        accumulator.clear();
-                    }
-                    Err(ReadlineError::Eof) => { // Ctrl-D
-                        break;
-                    }
-                    Err(err) => {
-                        println!("{RED}[xeo] err:{ESC} {:?}", err);
-                        break;
-                    }
-                }
-            }
-        }
         "script" => {
             // 1. Load and Parse the whole file
             let program = read_xeo(&script_path, &mut ctx);
@@ -313,7 +361,7 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, reverse: bool, ultra_verb
             ctx.pc = 0;
             execute(&mut ctx);
         },
-        _ => println!("Unknown mode: {}", mode),
+        _ => println!("unknown filename: {:?}", &script_path),
     }
 }
 
@@ -400,8 +448,8 @@ fn parse_tokens(tokens: Vec<Token>, ctx: &Context) -> Vec<Instruction> {
     // Hardcoded language keywords
     let base_commands = [
         "print", "set", "if", "else", "end", "repeat", "func", 
-        "run", "ask", "coreadd", "wait", "exit", "fetch", 
-        "wget", "return", "break", "continue", "use", "ext", "extc", "input",
+        "run", "ask", "coreadd", "wait", "exit", "return", 
+        "break", "continue", "use", "ext", "extc", "input",
         "sleep", "import", "call", "def", "function", "let"
     ];
 
@@ -504,11 +552,6 @@ fn execute(ctx: &mut Context) {
     while ctx.pc < ctx.program.len() {
         let instr = &ctx.program[ctx.pc];
 
-        if SHOULD_STOP.load(Ordering::SeqCst) {
-            SHOULD_STOP.store(false, Ordering::SeqCst); // Reset for next time
-            break; // Exit the loop and return to REPL
-        }
-
         // --- SIGNAL HANDLING ---
         if ctx.signal == Signal::Return {
              // If we found the function end (and it's not a loop end), stop skipping
@@ -554,43 +597,6 @@ fn execute(ctx: &mut Context) {
                     Err(e) => {
                         ctx.report_error(&format!("{}", e), instr.line_num);
                     }
-                }
-            }
-            "fetch" => {
-                let url = resolve_vars(&instr.args[0], ctx);
-                verbose_log(ctx, &format!("fetching {}...", url));
-
-                // 1. Use send_lazy to stream the response
-                match minreq::get(&url).with_max_redirects(5).send_lazy() {
-                    Ok(res) => {
-                        let mut body_accumulator = Vec::new(); // Use a Vec to collect bytes
-                        let mut chunk_buffer = Vec::with_capacity(8192); // 8KB check-point
-
-                        for byte_result in res {
-                            // 2. CHECK INTERRUPT (Every byte or every chunk)
-                            if SHOULD_STOP.load(Ordering::SeqCst) {
-                                println!("{BLUE}[xeo] fetch:{ESC} aborted by user");
-                                return; 
-                            }
-
-                            if let Ok((byte, _)) = byte_result {
-                                chunk_buffer.push(byte);
-                                
-                                // 3. Move from chunk buffer to main body
-                                if chunk_buffer.len() >= 8192 {
-                                    body_accumulator.append(&mut chunk_buffer);
-                                }
-                            }
-                        }
-                        
-                        // 4. Finalize the remaining bytes
-                        body_accumulator.append(&mut chunk_buffer);
-
-                        // 5. Convert to String and store in 'res' variable
-                        let final_body = String::from_utf8_lossy(&body_accumulator).to_string();
-                        ctx.variables.insert("res".to_string(), final_body);
-                    }
-                    Err(e) => ctx.report_error(&format!("fetch failed: {}", e), instr.line_num),
                 }
             }
             "find" => {
@@ -706,10 +712,6 @@ fn execute(ctx: &mut Context) {
                 if let Ok(mut remaining_ms) = ms_str.parse::<u64>() {
                     // Break the wait into 100ms chunks
                     while remaining_ms > 0 {
-                        // 1. Check if we should stop immediately
-                        if SHOULD_STOP.load(Ordering::SeqCst) {
-                            break; 
-                        }
 
                         // 2. Decide how long to sleep this chunk (max 100ms)
                         let sleep_chunk = if remaining_ms > 100 { 100 } else { remaining_ms };
@@ -748,14 +750,14 @@ fn execute(ctx: &mut Context) {
                             full_expr.chars().any(|c| "+-*/%() ".contains(c));
 
                 if is_math {
-                    match evalexpr::eval(&full_expr) {
-                        Ok(value) => {
-                            ctx.variables.insert(final_key, value.to_string());
-                        }
-                        Err(_) => {
-                            ctx.variables.insert(final_key, full_expr);
-                        }
-                    }
+                    // split the expression into tokens for our new evaluator
+                    let args: Vec<String> = full_expr.split_whitespace().map(|s| s.to_string()).collect();
+
+                    // run it through our lean, 0kb-overhead math machine
+                    let result = evaluate(&args, ctx);
+
+                    // store it back in the variables map
+                    ctx.variables.insert(final_key, result.to_string());
                 } else {
                     let mut final_str = String::new();
                     for part in resolved_parts {
