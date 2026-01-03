@@ -23,6 +23,7 @@ fn main() {
     let verbose = args.iter().any(|arg| arg == "-v" || arg == "--verbose");
     let ultra_verbose = args.iter().any(|arg| arg == "-vv" || arg == "--trace" || arg == "--debug");
     let version = args.iter().any(|arg| arg == "-V" || arg == "--version");
+    let pipe = args.iter().any(|arg| arg == "-p" || arg == "--pipe");
 
     let verbose = verbose || ultra_verbose;
     
@@ -35,9 +36,9 @@ fn main() {
         println!("v4.0.0 snapshot 25w52e");
         return;
     }
-    if args.len() < 2 {
+    if (args.len() < 2) || pipe {
         // Pass flags into your mode handler
-        mode("interactive", &args, verbose, ultra_verbose);
+        mode("pipe", &args, verbose, ultra_verbose);
         return;
     }
     
@@ -161,6 +162,32 @@ fn clean_multiline(input: &str) -> String {
         .join("\n")
         .trim() // Removes the very first and last newlines from the " " quotes
         .to_string()
+}
+
+fn is_block_complete(input: &str) -> bool {
+    let mut depth = 0;
+    let mut in_quotes = false;
+    
+    // Simple character scan for quotes and block keywords
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' && (i == 0 || chars[i-1] != '\\') {
+            in_quotes = !in_quotes;
+        }
+        
+        if !in_quotes {
+            // Check for block starts (must be surrounded by boundaries or start of string)
+            let remaining = &input[i..];
+            if remaining.starts_with("func") || remaining.starts_with("if") || remaining.starts_with("repeat") || remaining.starts_with("def") || remaining.starts_with("function") {
+                depth += 1;
+            } else if remaining.starts_with("end") {
+                depth -= 1;
+            }
+        }
+        i += 1;
+    }
+    depth <= 0
 }
 
 //================================//
@@ -352,6 +379,36 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, ultra_verbose: bool) {
     let script_path = PathBuf::from(&path_str);
 
     match mode {
+        "pipe" => {
+            use std::io::{self, BufRead, Write};
+
+            let stdin = io::stdin();
+            let mut handle = stdin.lock();
+            let mut accumulator = String::new();
+            let mut line = String::new();
+
+            loop {
+                line.clear();
+                // read_line is the raw way to get data from the pipe
+                if handle.read_line(&mut line).unwrap() == 0 {
+                    break; // pipe closed, peace out
+                }
+
+                accumulator.push_str(&line);
+
+                // check if the code block is finished (same logic as your repl)
+                if is_block_complete(&accumulator) {
+                    let new_instrs = parse(&accumulator, &mut ctx);
+                    ctx.program.extend(new_instrs);
+                    
+                    execute(&mut ctx);
+                    
+                    // extremely important for pipes: tell the host we're done
+                    io::stdout().flush().ok();
+                    accumulator.clear();
+                }
+            }
+        }
         "script" => {
             // 1. Load and Parse the whole file
             let program = read_xeo(&script_path, &mut ctx);
