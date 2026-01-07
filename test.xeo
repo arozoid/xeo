@@ -8,13 +8,15 @@ func greet $person
     set $$person "brozo"
 end
 
-func yess
-    print "brozo, we made it!!!"
+func yess $person
+    print $person", we made it!!!"
 end
 
 ask $epic "who are you brozo? "
 run greet $epic
 print $$epic
+coreadd yess
+yess "brozo"
 print "
 is this thing working?
 idk

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "xeo2"
-version = "0.1.0"
+name = "xeo"
+version = "4.0.0"

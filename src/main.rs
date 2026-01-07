@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, Write, BufRead, Stdin};
 
 fn get_xeon_dir() -> PathBuf {
     #[cfg(windows)]
@@ -35,10 +35,11 @@ fn main() {
         println!("{BLUE}the .xeo scripting lang{ESC}");
         println!("v4.0.0 snapshot 25w52e");
         return;
-    }
-    if (args.len() < 2) || pipe {
-        // Pass flags into your mode handler
-        mode("pipe", &args, verbose, ultra_verbose);
+    } else if pipe {
+        mode("pipe/oneshot", &args, verbose, ultra_verbose);
+        return;
+    } else if args.len() < 2 {
+        mode("pipe/ongoing", &args, verbose, ultra_verbose);
         return;
     }
     
@@ -379,34 +380,34 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, ultra_verbose: bool) {
     let script_path = PathBuf::from(&path_str);
 
     match mode {
-        "pipe" => {
-            use std::io::{self, BufRead, Write};
+        "pipe/ongoing" => {
+            let stdin = io::stdin();   
+            handle_pipe(stdin, ctx);
+        }
+        "pipe/oneshot" => {
+            // read everything from stdin first
+            let accumulator = {
+                let stdin = io::stdin();
+                let mut handle = stdin.lock();
+                let mut buffer = String::new();
+                let mut line = String::new();
 
-            let stdin = io::stdin();
-            let mut handle = stdin.lock();
-            let mut accumulator = String::new();
-            let mut line = String::new();
-
-            loop {
-                line.clear();
-                // read_line is the raw way to get data from the pipe
-                if handle.read_line(&mut line).unwrap() == 0 {
-                    break; // pipe closed, peace out
+                while handle.read_line(&mut line).expect("failed to read stdin") != 0 {
+                    buffer.push_str(&line);
+                    line.clear();
                 }
 
-                accumulator.push_str(&line);
+                buffer
+            }; // <- stdin.lock goes out of scope here, lock is released
 
-                // check if the code block is finished (same logic as your repl)
-                if is_block_complete(&accumulator) {
-                    let new_instrs = parse(&accumulator, &mut ctx);
-                    ctx.program.extend(new_instrs);
-                    
-                    execute(&mut ctx);
-                    
-                    // extremely important for pipes: tell the host we're done
-                    io::stdout().flush().ok();
-                    accumulator.clear();
-                }
+            // only execute if there was input
+            if !accumulator.trim().is_empty() {
+                let new_instrs = parse(&accumulator, &mut ctx);
+                ctx.program.extend(new_instrs);
+                execute(&mut ctx);
+
+                // flush output for host
+                io::stdout().flush().ok();
             }
         }
         "script" => {
@@ -419,6 +420,34 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, ultra_verbose: bool) {
             execute(&mut ctx);
         },
         _ => println!("unknown filename: {:?}", &script_path),
+    }
+}
+
+fn handle_pipe(stdin: Stdin, mut ctx: Context) {
+    let mut handle = stdin.lock();
+    let mut accumulator = String::new();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        // read_line is the raw way to get data from the pipe
+        if handle.read_line(&mut line).unwrap() == 0 {
+            break; // pipe closed, peace out
+        }
+
+        accumulator.push_str(&line);
+
+        // check if the code block is finished (same logic as your repl)
+        if is_block_complete(&accumulator) {
+            let new_instrs = parse(&accumulator, &mut ctx);
+            ctx.program.extend(new_instrs);
+            
+            execute(&mut ctx);
+            
+            // extremely important for pipes: tell the host we're done
+            io::stdout().flush().ok();
+            accumulator.clear();
+        }
     }
 }
 
