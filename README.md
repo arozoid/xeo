@@ -1,64 +1,69 @@
 # .xeo
 
-**.xeo** is a standalone, bash/lua-like scripting lang
-for **xeon** built on rust, featuring 20 core commands:
+**.xeo** is a lightweight bash/lua-like scripting language for **xeon** built in rust, keeping the core language to just 20 commands while staying fast, standalone, and easy to extend.
 
 ## core commands
 
-### 2 output & input commands
-- `print <args>`: writes all args on terminal, with `$var` interpolation in strings.
-- `ask $var <prompt>`: asks the user a question, and returns the input as a variable.
+### output & input
 
-### 3 variables & math commands
-- `set $var <expr>`: sets a variable. if the expression is numeric, it's evaluated with the math engine (`1 + 2 * 3` → `7`); otherwise it's concatenated as a string. aliased as `let`.
-- `find $haystack <needle> $bool`: looks for a string inside a variable, and returns a boolean as a variable.
-- `get <expr> as $var`: evaluates the expression to form a variable name, then retrieves that variable's value into another variable.
+- `print <args>` writes values to the terminal with `$var` interpolation inside strings.
+- `ask $var <prompt>` asks the user a question and stores the response in a variable.
 
-### 8 flow control commands
-- `if <expr>`: executes the commands under it if the condition is met. expressions support `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, and `true`/`false`.
-- `else`: runs when the preceding `if` was false (linked to the same `end`).
-- `repeat <count> as $var`: repeats the commands under it a specific number of times, providing an iterator that starts at 0.
-- `break`: stops the current repeat loop.
-- `continue`: skips to the next iteration of the current repeat loop.
-- `return`: exits the current function early.
-- `wait <ms>`: pauses the code for the specified milliseconds. (1 second = 1000ms) aliased as `sleep`.
-- `exit`: terminates the script execution.
+### variables & math
 
-### 7 modularity & system commands
-- `use <module>`: loads a library from the current directory or `~/.xeon/lib`. loading is idempotent per session. aliased as `import`.
-- `func <name> $arg1 $arg2 ... $argN`: defines a reusable block of code with optional arguments.
-- `end`: closes an `if`, `else`, `repeat`, or `func` block.
-- `run <name> <arg1> ... <argN>`: calls a previously defined function. aliased as `call`.
-- `coreadd <name>`: registers a function name so it can be called as a bare command (e.g. `coreadd yess` then `yess "brozo"`).
-- `ext <cmd> <arg1> ... <argN>`: runs a global extension binary from `~/.xeon/bin`.
-- `extc <cmd> <arg1> ... <argN>`: runs a global extension and captures its stdout into the `$res` variable.
+- `set $var <expr>` sets a variable, evaluating numeric expressions like `1 + 2 * 3` into `7` while concatenating strings normally. `let` is an alias.
+- `find $haystack <needle> $bool` checks whether one string exists inside another and stores the result as a boolean.
+- `get <expr> as $var` evaluates an expression into a variable name before retrieving that variable's value.
+
+### flow control
+
+- `if <expr>` runs a block when its condition is true.
+- `else` runs when the preceding `if` was false.
+- `repeat <count> as $var` repeats a block a fixed number of times while providing an iterator that starts at `0`.
+- `break` exits the current loop.
+- `continue` skips to the next iteration.
+- `return` exits the current function early.
+- `wait <ms>` pauses execution for a number of milliseconds. `sleep` is an alias.
+- `exit` terminates the script immediately.
+
+### modularity & system
+
+- `use <module>` loads a library from the current directory or `~/.xeon/lib`, only importing each module once per session. `import` is an alias.
+- `func <name> $arg1 $arg2 ...` defines a reusable function.
+- `end` closes an `if`, `else`, `repeat`, or `func` block.
+- `run <name> <arg1> ...` calls a function. `call` is an alias.
+- `coreadd <name>` registers a function so it can be called like a built-in command.
+- `ext <cmd> <args...>` runs a global extension from `~/.xeon/bin`.
+- `extc <cmd> <args...>` runs an extension and captures its output into `$res`.
 
 ---
 
 ## expressions
 
-variables are interpolated inside any string with `$name`. math, comparison, and
-logic can be combined in `if` and `set` expressions:
+variables interpolate into strings with `$name`, while arithmetic, comparisons, and boolean logic all work together naturally inside expressions.
 
 | operators | meaning |
 |---|---|
-| `+ - * / % ^` | arithmetic (with `()` grouping, e.g. `(2 + 3) * 4` → `20`) |
-| `== != < > <= >=` | comparison |
-| `&& \|\|` | logic |
+| `+ - * / % ^` | arithmetic |
+| `()` | grouping |
+| `== != < > <= >=` | comparisons |
+| `&& \|\|` | boolean logic |
 | `true false` | boolean literals |
 
 examples:
 
+```xeo
+set $x 1 + 2 * 3
+set $s "hello" + " world"
+
+if $x > 5 && $ok
 ```
-set $x 1 + 2 * 3        # $x = 7
-set $s "hello" + " world"   # $s = hello world (string concat)
-if $x > 5 && $ok         # combined condition
-```
+
+---
 
 ## comments
 
-`#` and `--` start a comment that runs to the end of the line. multi-line strings
-keep their newlines when quoted.
+`#` and `--` create single-line comments, while quoted multi-line strings preserve their original formatting.
 
 ---
 
@@ -66,37 +71,39 @@ keep their newlines when quoted.
 
 ### double-pipe protocol (`xeo --pipe`)
 
-`xeo -p` starts a persistent, framed request/response session over stdin/stdout so
-external programs can drive xeo like an embedded library — no import needed.
+`xeo -p` starts a persistent stdin/stdout session that lets external programs talk to xeo without restarting the interpreter every time, keeping variables, functions, and imported modules alive between requests so it behaves more like an embedded scripting engine than a disposable process.
 
-- Send one or more xeo statements as a **request**, terminated by a blank line (or EOF).
-- xeo keeps its variables, functions, and loaded modules alive between requests.
-- Each request produces exactly one framed **response**, terminated by:
-  ```
-  __XEO_DONE__
-  ```
-- Program output (from `print`, `ext`, ...) appears before the sentinel; runtime
-  errors appear as `ERR: <message>` lines, also before the sentinel. raw ANSI
-  error output still goes to stderr.
+every request produces exactly one response frame ending with:
 
-example (from a host program):
+```text
+__XEO_DONE__
 ```
-send:  set $a 5\n\n
+
+program output appears before the sentinel, while runtime errors are returned as `ERR:` lines.
+
+example:
+
+```text
+send:  set $a 5
+
 recv:  __XEO_DONE__
 
-send:  print "a=" $a\n\n
+send:  print "a=" $a
+
 recv:  a= 5
        __XEO_DONE__
 
-send:  if $a > 2\n  print "big"\nend\n\n
+send:  if $a > 2
+         print "big"
+       end
+
 recv:  big
        __XEO_DONE__
 ```
 
 ### library loading (`use`)
-modules live in the current directory or `~/.xeon/lib` as plain `.xeo` files.
-`use printc` loads `printc.xeo` once per session and appends it inline so the
-functions it defines stay callable:
+
+modules live as plain `.xeo` files in the current directory or `~/.xeon/lib`, loading only once per session so importing the same module twice never duplicates it.
 
 ```xeo
 use printc
@@ -104,14 +111,12 @@ printc "{green}hi{clear}"
 ```
 
 ### global extensions
-instead of bloating the core binary, xeo runs specialized binaries from
-`~/.xeon/bin` via `ext`. adding a new language command is just dropping a binary
-in that folder. **.xeo itself stays around 1MB.**
 
-### standalone simplicity
-the interpreter is a single rust binary with zero dependencies, handling
-variable interpolation, math, logic, and JSON-free structured output out of the
-box.
+instead of bloating the interpreter with niche features, xeo delegates specialized commands to standalone binaries inside `~/.xeon/bin`, making new functionality as simple as dropping in another executable while keeping the core binary around **1 mb**.
+
+### standalone by design
+
+xeo runs as a single rust binary with zero runtime dependencies, handling variables, interpolation, expressions, functions, modules, and structured output without dragging in a heavyweight runtime.
 
 ---
 
@@ -125,6 +130,6 @@ cp target/release/xeo ~/.xeon/bin/xeo
 # run a script
 xeo script.xeo
 
-# start an interactive / embedded pipe session
+# start a persistent pipe session
 xeo -p
 ```

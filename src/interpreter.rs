@@ -88,7 +88,7 @@ fn call_function(ctx: &mut Context, name: &str, params: Vec<String>) -> Flow {
 }
 
 fn handle_print(ctx: &mut Context, instr: &Instruction) -> Flow {
-    let output = ctx.resolve(&clean_multiline(&instr.args.join(" ")));
+    let output = ctx.resolve(&clean_multiline(&instr.args.join("")));
     emit_out(ctx, &output);
     Flow::Next
 }
