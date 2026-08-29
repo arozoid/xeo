@@ -30,6 +30,7 @@ fn main() {
     if version {
         println!("{BLUE}the .xeo scripting lang{ESC}");
         println!("v4.0.0 snapshot 25w52e");
+        println!("for {} ({})", host_triple(), host_platform());
         return;
     } else if pipe {
         mode("pipe", &args, verbose, ultra_verbose);
@@ -48,6 +49,7 @@ fn main() {
 fn mode(mode: &str, args: &Vec<String>, verbose: bool, ultra_verbose: bool) {
     let path_str = args.get(1).cloned().unwrap_or_default();
     let mut ctx = Context::new(path_str.clone(), verbose, ultra_verbose);
+    seed_startup_args(&mut ctx, args);
     let script_path = PathBuf::from(&path_str);
 
     match mode {
@@ -64,6 +66,17 @@ fn mode(mode: &str, args: &Vec<String>, verbose: bool, ultra_verbose: bool) {
             interpreter::execute(&mut ctx);
         }
         _ => println!("unknown filename: {:?}", &script_path),
+    }
+}
+
+fn seed_startup_args(ctx: &mut Context, args: &[String]) {
+    let script_args = args.get(2..).unwrap_or(&[]);
+
+    ctx.variables.insert("ARGC".to_string(), script_args.len().to_string());
+    ctx.variables.insert("ARGS".to_string(), script_args.join(" "));
+
+    for (index, value) in script_args.iter().enumerate() {
+        ctx.variables.insert(format!("ARG{}", index + 1), value.clone());
     }
 }
 
@@ -86,4 +99,41 @@ fn get_xeon_dir() -> PathBuf {
 
     path.push(".xeon");
     path
+}
+
+//================================//
+//----- host architecture --------//
+//================================//
+/// normalized CPU architecture: `x86_64`, `arm64`, else `uname -m`
+fn host_arch() -> String {
+    let raw = uname_m().unwrap_or_else(|| "unknown".to_string());
+    match raw.as_str() {
+        "x86_64" | "amd64" => "x86_64".to_string(),
+        "aarch64" | "arm64" => "arm64".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// normalized operating system: `linux`, `windows`, `macos`, else the os name
+fn host_platform() -> String {
+    match std::env::consts::OS {
+        "linux" => "linux".to_string(),
+        "windows" => "windows".to_string(),
+        "macos" => "macos".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// rust-style target triple for the host (e.g. `x86_64-linux-x86_64`)
+fn host_triple() -> String {
+    format!("{}-{}-{}", host_arch(), host_platform(), std::env::consts::ARCH)
+}
+
+fn uname_m() -> Option<String> {
+    let out = std::process::Command::new("uname").arg("-m").output().ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
 }
