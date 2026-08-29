@@ -1,0 +1,4 @@
+#!/usr/bin/env xeo
+use printc
+
+printc "{red}yo!"
