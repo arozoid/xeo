@@ -47,12 +47,11 @@ get "base_val" as $copy
 print "copied $base_val via get: " $copy
 
 -- 5. modularity (loading a library from the local xeo.repo checkout)
-use ../xeo.repo/lib/simple
-use ../xeo.repo/lib/fs
-use ../xeo.repo/lib/env
-fs_exists example.xeo $example_exists
-env_has HOME $home_exists
-env_get HOME $home_dir
+use fs
+use env
+fs exists example.xeo @example_exists
+env has HOME @home_exists
+env get HOME @home_dir
 print "home dir: " $home_dir
 print "example.xeo exists? " $example_exists
 print "HOME env set? " $home_exists

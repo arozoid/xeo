@@ -1,0 +1,55 @@
+-- destination (@name) feature tests
+-- run: xeo tests_dest.xeo
+-- each block prints an expected line
+
+-- 1. func return captured via @name (run)
+func get_value
+    return "hello"
+end
+run get_value @result
+print "[1] run @dest:          |$result|"
+
+-- 2. coreadd function return captured via @name
+coreadd get_value
+get_value @result2
+print "[2] coreadd @dest:      |$result2|"
+
+-- 3. exto trailing @name destination
+exto env get HOME @home_dir
+print "[3] exto @dest:         |$home_dir|"
+
+-- 4. extc trailing @name destination
+extc env get HOME @home_dir2
+print "[4] extc @dest:         |$home_dir2|"
+
+-- 5. missing destination -> $res only
+set $saved $res
+exto env get HOME
+print "[5] exto no dest res:   |$res|"
+
+-- 6. normal $var argument still read normally
+func show $n
+    return "val=" $n
+end
+set $x "picked"
+run show $x @out
+print "[6] \$var arg:           |$out|"
+
+-- 7. multiple function arguments, @name final
+func add3 $a $b $c
+    set $t $a + $b + $c
+    return $t
+end
+run add3 1 2 3 @sum
+print "[7] multi func args:    |$sum|"
+
+-- 8. multiple coreadd function arguments with @name final
+coreadd pick
+func pick $a $b $c
+    set $t $a + $b + $c
+    return $t
+end
+pick 4 5 6 @sum2
+print "[8] multi coreadd args: |$sum2|"
+
+print "[done]"

@@ -12,6 +12,7 @@
 ### variables & math
 
 - `set $var <expr>` sets a variable, evaluating numeric expressions like `1 + 2 * 3` into `7` while concatenating strings normally. `let` is an alias.
+- `$name` reads a variable's value, while `@name` is a destination reference that captures a command/function's output into a variable. `@` is preserved when passed through function arguments, letting thin modules forward an output destination to `exto`/`extc`.
 - `find $haystack <needle> $bool` checks whether one string exists inside another and stores the result as a boolean.
 - `get <expr> as $var` evaluates an expression into a variable name before retrieving that variable's value.
 
@@ -22,9 +23,17 @@
 - `repeat <count> as $var` repeats a block a fixed number of times while providing an iterator that starts at `0`.
 - `break` exits the current loop.
 - `continue` skips to the next iteration.
-- `return` exits the current function early.
+- `return` exits the current function early. `return <value>` also sets the value captured by a caller's `@name` destination.
 - `wait <ms>` pauses execution for a number of milliseconds. `sleep` is an alias.
 - `exit` terminates the script immediately.
+
+Output destinations (`@name`) work with `run`/`do`/`r`/`call`, coreadd'd functions, and `exto`/`extc`:
+
+```text
+run get_value @result        -- store the function's return value in $result
+env get HOME @home_dir       -- coreadd'd function captures into $home_dir
+exto env list @env_dump      -- capture stdout into $res and $env_dump
+```
 
 ### modularity & system
 

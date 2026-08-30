@@ -22,6 +22,8 @@ pub struct Context {
     pub return_stack: Vec<usize>,
     pub loop_stack: Vec<usize>,
     pub arg_stack: Vec<Vec<String>>,
+    pub dest_stack: Vec<Option<String>>,
+    pub return_value: Option<String>,
     pub program: Vec<Instruction>,
     pub pc: usize,
 
@@ -46,6 +48,8 @@ impl Context {
             return_stack: Vec::new(),
             loop_stack: Vec::new(),
             arg_stack: Vec::new(),
+            dest_stack: Vec::new(),
+            return_value: None,
             program: Vec::new(),
             pc: 0,
 

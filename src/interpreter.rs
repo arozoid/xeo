@@ -78,9 +78,13 @@ fn dispatch(ctx: &mut Context, instr: &Instruction) -> Flow {
 }
 
 // Push resolved params, save the return address, jump to the function body.
-fn call_function(ctx: &mut Context, name: &str, params: Vec<String>) -> Flow {
+// `dest` is the destination variable (from a trailing @name) to capture the
+// function's return value into.
+fn call_function(ctx: &mut Context, name: &str, params: Vec<String>, dest: Option<String>) -> Flow {
     if let Some(&target_pc) = ctx.functions.get(name) {
         ctx.arg_stack.push(params);
+        ctx.dest_stack.push(dest);
+        ctx.return_value = None;
         ctx.return_stack.push(ctx.pc + 1);
         return Flow::Jump(target_pc);
     }
@@ -209,15 +213,37 @@ fn handle_ext(ctx: &mut Context, instr: &Instruction) -> Flow {
         return Flow::Stop;
     }
 
-    let cmd_args: Vec<String> = instr.args[1..].iter().map(|a| ctx.resolve(a)).collect();
+    // Resolve the command arguments (instr.args[0] is the command name).
+    let resolved: Vec<String> = instr.args[1..].iter().map(|a| ctx.resolve(a)).collect();
+
+    // For a capture call, a trailing non-empty @name is an output destination:
+    // `exto cmd ... @out` captures stdout into `res` AND `out`. The @name is
+    // not passed to the external process itself. Empty args (unbound module
+    // params) are dropped so a thin forwarding module can carry the @ token.
+    let mut dest: Option<String> = None;
+    let mut cmd_args = resolved.clone();
+    if is_capture
+        && let Some(idx) = resolved.iter().rposition(|a| !a.trim().is_empty())
+        && let Some(last) = resolved.get(idx)
+        && last.starts_with('@')
+        && last.len() > 1
+    {
+        dest = Some(last[1..].to_string());
+        cmd_args.remove(idx);
+    }
+    cmd_args.retain(|a| !a.is_empty());
+
     let mut command = process::Command::new(cmd_path);
-    command.args(cmd_args);
+    command.args(&cmd_args);
 
     if is_capture {
         match command.output() {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                ctx.variables.insert("res".to_string(), stdout);
+                ctx.variables.insert("res".to_string(), stdout.clone());
+                if let Some(d) = dest {
+                    ctx.variables.insert(d, stdout);
+                }
             }
             Err(e) => ctx.report_error(&format!("extc failed: {}", e), instr.line_num),
         }
@@ -303,7 +329,11 @@ fn handle_continue(ctx: &mut Context, _instr: &Instruction) -> Flow {
     }
 }
 
-fn handle_return(ctx: &mut Context, _instr: &Instruction) -> Flow {
+fn handle_return(ctx: &mut Context, instr: &Instruction) -> Flow {
+    if !instr.args.is_empty() {
+        let value = instr.args.iter().map(|a| ctx.resolve(a)).collect::<Vec<_>>().join(" ");
+        ctx.return_value = Some(value);
+    }
     ctx.signal = Signal::Return;
     Flow::Next
 }
@@ -317,18 +347,21 @@ fn handle_func(ctx: &mut Context, instr: &Instruction) -> Flow {
 
     if let Some(passed_values) = ctx.arg_stack.pop() {
         for (i, val_name) in instr.args.iter().skip(1).enumerate() {
-            if let Some(val) = passed_values.get(i) {
-                let key = val_name.trim_start_matches('$').to_string();
-                ctx.variables.insert(key, val.clone());
-            }
+            let key = val_name.trim_start_matches('$').to_string();
+            let val = passed_values.get(i).cloned().unwrap_or_default();
+            ctx.variables.insert(key, val);
         }
     }
     Flow::Next
 }
 
 fn handle_run(ctx: &mut Context, instr: &Instruction) -> Flow {
+    let dest = match instr.args.last() {
+        Some(a) if a.starts_with('@') && a.len() > 1 => Some(a[1..].to_string()),
+        _ => None,
+    };
     let params: Vec<String> = instr.args.iter().skip(1).map(|a| ctx.resolve(a)).collect();
-    call_function(ctx, &instr.args[0], params)
+    call_function(ctx, &instr.args[0], params, dest)
 }
 
 fn handle_repeat(ctx: &mut Context, instr: &Instruction) -> Flow {
@@ -398,11 +431,18 @@ fn handle_end(ctx: &mut Context, instr: &Instruction) -> Flow {
         return Flow::Jump(target);
     }
 
-    if !ctx.return_stack.is_empty() {
-        if let Some(saved_pc) = ctx.return_stack.pop() {
-            ctx.signal = Signal::None;
-            return Flow::Jump(saved_pc);
+    if !ctx.return_stack.is_empty()
+        && let Some(saved_pc) = ctx.return_stack.pop()
+    {
+        ctx.signal = Signal::None;
+        // Capture the function's return value into the call's @name destination.
+        if let Some(dest) = ctx.dest_stack.pop().flatten()
+            && let Some(val) = ctx.return_value.take()
+        {
+            ctx.variables.insert(dest, val);
         }
+        ctx.return_value = None;
+        return Flow::Jump(saved_pc);
     }
 
     Flow::Next
@@ -410,8 +450,12 @@ fn handle_end(ctx: &mut Context, instr: &Instruction) -> Flow {
 
 fn handle_custom(ctx: &mut Context, instr: &Instruction) -> Flow {
     if ctx.corefuncs.contains(&instr.name) {
+        let dest = match instr.args.last() {
+            Some(a) if a.starts_with('@') && a.len() > 1 => Some(a[1..].to_string()),
+            _ => None,
+        };
         let params: Vec<String> = instr.args.iter().map(|a| ctx.resolve(a)).collect();
-        return call_function(ctx, &instr.name, params);
+        return call_function(ctx, &instr.name, params, dest);
     } else if instr.name != "coreadd" {
         ctx.report_error(&format!("unknown command: {}", instr.name), instr.line_num);
     }
