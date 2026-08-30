@@ -1,6 +1,16 @@
 #!/usr/bin/env xeo
 -- xeo script example (v4)
 print "--- starting xeon engine ---"
+print "argc: " $ARGC
+if $ARGC > 0
+    print "arg1: " $ARG1
+end
+if $ARGC > 1
+    print "arg2: " $ARG2
+end
+if $ARGC > 0
+    print "all args: " $ARGS
+end
 
 -- 1. basic variables and math
 set $base_val 10 + 5
@@ -36,8 +46,16 @@ print "fox found? " $found
 get "base_val" as $copy
 print "copied $base_val via get: " $copy
 
--- 5. modularity (loading a library from ~/.xeon/lib)
-use simple
+-- 5. modularity (loading a library from the local xeo.repo checkout)
+use ../xeo.repo/lib/simple
+use ../xeo.repo/lib/fs
+use ../xeo.repo/lib/env
+fs_exists example.xeo $example_exists
+env_has HOME $home_exists
+env_get HOME $home_dir
+print "home dir: " $home_dir
+print "example.xeo exists? " $example_exists
+print "HOME env set? " $home_exists
 print ""
 
 -- 6. extension system

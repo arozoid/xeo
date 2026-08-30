@@ -174,7 +174,27 @@ fn handle_use(ctx: &mut Context, instr: &Instruction) -> Flow {
                 }
             }
         }
-        None => ctx.report_error(&format!("module '{}' not found in local dir or ~/.xeon/lib", raw_name), instr.line_num),
+        None => {
+            let local_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let xeon_lib_dir = get_xeon_dir().join("lib");
+            let mut candidates = vec![
+                local_dir.join(&raw_name),
+                xeon_lib_dir.join(&raw_name),
+            ];
+
+            if !raw_name.ends_with(".xeo") {
+                candidates.push(local_dir.join(format!("{raw_name}.xeo")));
+                candidates.push(xeon_lib_dir.join(format!("{raw_name}.xeo")));
+            }
+
+            let checked = candidates
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            ctx.report_error(&format!("library '{raw_name}' not found. checked: {checked}"), instr.line_num)
+        }
     }
     Flow::Next
 }
@@ -196,7 +216,7 @@ fn handle_ext(ctx: &mut Context, instr: &Instruction) -> Flow {
     if is_capture {
         match command.output() {
             Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                 ctx.variables.insert("res".to_string(), stdout);
             }
             Err(e) => ctx.report_error(&format!("extc failed: {}", e), instr.line_num),
