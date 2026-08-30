@@ -29,7 +29,7 @@ fn main() {
 
     if version {
         println!("{BLUE}the .xeo scripting lang{ESC}");
-        println!("v4.0.0 snapshot 25w52e");
+        println!("v4.1.0 snapshot 26w34a");
         println!("for {} ({})", host_triple(), host_platform());
         return;
     } else if pipe {

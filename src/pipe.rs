@@ -55,7 +55,7 @@ pub fn append_program(ctx: &mut Context, content: &str) -> usize {
         }
     }
     for (i, instr) in new_instrs.iter().enumerate() {
-        if matches!(instr.name.as_str(), "func" | "def" | "function") {
+        if matches!(instr.name.as_str(), "func" | "fn" | "def" | "function") {
             if let Some(name) = instr.args.first() {
                 ctx.functions.insert(name.clone(), start + i);
             }

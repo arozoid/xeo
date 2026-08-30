@@ -39,9 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
+          components: rust-src
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -55,8 +56,10 @@ jobs:
             choco install llvm -y
           }
           lld-link --version
+          Push-Location $HOME
           cargo install xwin --locked
           xwin splat --output "$HOME/.xwin"
+          Pop-Location
           "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER=lld-link" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static -L native=$HOME/.xwin/crt/lib/arm64 -L native=$HOME/.xwin/sdk/lib/um/arm64 -L native=$HOME/.xwin/sdk/lib/ucrt/arm64" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 

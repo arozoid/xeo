@@ -57,7 +57,7 @@ pub fn parse(content: &str, ctx: &mut Context) -> Vec<Instruction> {
     for i in 0..program.len() {
         match program[i].name.as_str() {
             "if" | "repeat" => stack.push(i),
-            "func" => {
+            "func" | "fn" | "def" | "function" => {
                 let func_name = program[i].args[0].clone();
                 ctx.functions.insert(func_name, i);
                 stack.push(i);

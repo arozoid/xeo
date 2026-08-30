@@ -59,15 +59,15 @@ fn dispatch(ctx: &mut Context, instr: &Instruction) -> Flow {
         "ask" | "input" => handle_ask(ctx, instr),
         "find" => handle_find(ctx, instr),
         "get" => handle_get(ctx, instr),
-        "ext" | "extc" => handle_ext(ctx, instr),
+        "ext" | "exto" | "extc" => handle_ext(ctx, instr),
         "use" | "import" => handle_use(ctx, instr),
         "wait" | "sleep" => handle_wait(instr),
         "set" | "let" => handle_set(ctx, instr),
         "break" => handle_break(ctx, instr),
         "continue" => handle_continue(ctx, instr),
         "return" => handle_return(ctx, instr),
-        "func" | "def" | "function" => handle_func(ctx, instr),
-        "run" | "call" => handle_run(ctx, instr),
+        "func" | "fn" | "def" | "function" => handle_func(ctx, instr),
+        "run" | "do" | "r" | "call" => handle_run(ctx, instr),
         "repeat" => handle_repeat(ctx, instr),
         "if" => handle_if(ctx, instr),
         "else" => handle_else(instr),
@@ -200,7 +200,7 @@ fn handle_use(ctx: &mut Context, instr: &Instruction) -> Flow {
 }
 
 fn handle_ext(ctx: &mut Context, instr: &Instruction) -> Flow {
-    let is_capture = instr.name == "extc";
+    let is_capture = instr.name == "exto" || instr.name == "extc";
     let cmd_name = ctx.resolve(&instr.args[0]);
     let cmd_path = get_xeon_dir().join("bin").join(&cmd_name);
 

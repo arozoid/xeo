@@ -106,7 +106,7 @@ pub fn is_block_complete(input: &str) -> bool {
 
         if !in_quotes {
             let remaining = &input[i..];
-            if remaining.starts_with("func") || remaining.starts_with("if") || remaining.starts_with("repeat") || remaining.starts_with("def") || remaining.starts_with("function") {
+            if remaining.starts_with("func") || remaining.starts_with("fn") || remaining.starts_with("if") || remaining.starts_with("repeat") || remaining.starts_with("def") || remaining.starts_with("function") {
                 depth += 1;
             } else if remaining.starts_with("end") {
                 depth -= 1;

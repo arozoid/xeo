@@ -29,12 +29,12 @@
 ### modularity & system
 
 - `use <module>` loads a library from the current directory or `~/.xeon/lib`, only importing each module once per session. `import` is an alias.
-- `func <name> $arg1 $arg2 ...` defines a reusable function.
+- `func <name> $arg1 $arg2 ...` defines a reusable function. `fn`, `def`, and `function` are aliases.
 - `end` closes an `if`, `else`, `repeat`, or `func` block.
-- `run <name> <arg1> ...` calls a function. `call` is an alias.
+- `run <name> <arg1> ...` calls a function. `do`, `r`, and `call` are aliases.
 - `coreadd <name>` registers a function so it can be called like a built-in command.
 - `ext <cmd> <args...>` runs a global extension from `~/.xeon/bin`.
-- `extc <cmd> <args...>` runs an extension and captures its output into `$res`.
+- `exto <cmd> <args...>` runs an extension and captures its output into `$res`. `extc` is an alias.
 
 ---
 
@@ -123,7 +123,7 @@ xeo runs as a single rust binary with zero runtime dependencies, handling variab
 ## quick start
 
 ```sh
-# build from source
+# build from source (nightly automatically via rust-toolchain.toml, std rebuilt with build-std for a ~150 KB binary)
 cargo build --release
 cp target/release/xeo ~/.xeon/bin/xeo
 

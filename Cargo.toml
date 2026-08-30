@@ -1,6 +1,8 @@
+cargo-features = ["panic-immediate-abort"]
+
 [package]
 name = "xeo"
-version = "4.0.0"
+version = "4.1.0"
 edition = "2024"
 
 [dependencies]
@@ -10,7 +12,7 @@ opt-level = "z"     # Optimize for size ('s' or 'z')
 debug = false
 lto = "fat"          # Enable Link Time Optimization (fat LTO for best size)
 codegen-units = 1   # Reduce parallel code generation for better optimization
-panic = "abort"     # Remove stack unwinding code (saves ~10% size)
+panic = "immediate-abort" # Remove all panic machinery + unwinding (needs build-std)
 overflow-checks = false
 incremental = false
 strip = true        # Automatically strip symbols (same as running `strip` command)
