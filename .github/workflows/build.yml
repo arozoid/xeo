@@ -1,0 +1,84 @@
+name: build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: xeo-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: xeo-linux-arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: xeo-macos-arm64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            artifact: xeo-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: xeo-windows-x86_64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: xeo-windows-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target/${{ matrix.target }}'
+
+      - name: Install LLVM (needed for windows-arm64 cross-link)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: llvm/installer-action@main
+        with:
+          version: "20"
+
+      - name: Install xwin CRT/SDK for windows-arm64
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          cargo install xwin --locked
+          xwin splat --output "$HOME/.xwin"
+          "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER=lld-link" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static -L native=$HOME/.xwin/crt/lib/arm64 -L native=$HOME/.xwin/sdk/lib/um/arm64 -L native=$HOME/.xwin/sdk/lib/ucrt/arm64" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Smoke test
+        if: matrix.target != 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/xeo${{ runner.os == 'Windows' && '.exe' || '' }} -V
+
+      - name: Verify binary exists (win-arm64 cannot run on x64 runner)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: ls -la target/${{ matrix.target }}/release/xeo.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/xeo${{ runner.os == 'Windows' && '.exe' || '' }}
+          if-no-files-found: error
+          retention-days: 90
