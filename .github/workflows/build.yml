@@ -37,14 +37,14 @@ jobs:
             artifact: xeo-windows-arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
           components: rust-src
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: '. -> target/${{ matrix.target }}'
 
@@ -78,7 +78,7 @@ jobs:
         run: ls -la target/${{ matrix.target }}/release/xeo.exe
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: target/${{ matrix.target }}/release/xeo${{ runner.os == 'Windows' && '.exe' || '' }}
