@@ -47,16 +47,14 @@ jobs:
         with:
           workspaces: '. -> target/${{ matrix.target }}'
 
-      - name: Install LLVM (needed for windows-arm64 cross-link)
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        uses: llvm/installer-action@main
-        with:
-          version: "20"
-
       - name: Install xwin CRT/SDK for windows-arm64
         if: matrix.target == 'aarch64-pc-windows-msvc'
         shell: pwsh
         run: |
+          if (-not (Get-Command lld-link -ErrorAction SilentlyContinue)) {
+            choco install llvm -y
+          }
+          lld-link --version
           cargo install xwin --locked
           xwin splat --output "$HOME/.xwin"
           "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER=lld-link" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
